@@ -1,74 +1,54 @@
 import { CONFIG, type Config } from './config';
-import { circleHitsCircle, clamp } from './collision';
+import { circleHitsCircle, clamp, pushCircleOutOfRect } from './collision';
 import { Rng } from './rng';
+import { placeBarriers, spawnDrifter, spawnOrb, spawnTrap } from './spawn';
+import type { AbilityId, GameState, InputState, StepResult } from './types';
 
 /**
  * The whole game rules, with no Phaser and no browser code in here.
  * That keeps it fast to test and lets us reuse it anywhere later.
  *
- * Usage: createGame(seed) -> startRun(state) -> call stepGame() on a fixed timestep.
+ * Usage: createGame(seed) -> startRun(state) -> call stepGame() on a fixed timestep,
+ * and activateAbility() (abilities.ts) whenever the player presses an ability key.
  */
-
-export type GameStatus = 'ready' | 'playing' | 'gameover';
-
-export interface Hazard {
-  x: number;
-  y: number;
-  vx: number; // px per second
-  vy: number;
-  radius: number;
-}
-
-export interface Player {
-  x: number;
-  y: number;
-  radius: number;
-  lives: number;
-  /** Remaining invulnerability after a hit, in ms. 0 = can be hit. */
-  invulnerableMs: number;
-}
-
-export interface GameState {
-  status: GameStatus;
-  /** Survival time in ms. Only counts while status is 'playing'. */
-  timeMs: number;
-  player: Player;
-  hazards: Hazard[];
-  readonly seed: number;
-  readonly rng: Rng;
-}
-
-/** Movement intent for one step: each axis is -1, 0 or 1. */
-export interface InputState {
-  dx: number;
-  dy: number;
-}
-
-/** What happened during a step, so the renderer can react (flash, sound, etc.). */
-export interface StepResult {
-  hit: boolean;
-  gameOver: boolean;
-}
-
-const NO_EVENTS: StepResult = { hit: false, gameOver: false };
 
 export function createGame(seed: number, cfg: Config = CONFIG): GameState {
   const rng = new Rng(seed);
   const { arena } = cfg;
-  const player: Player = {
+  const player = {
     x: arena.x + arena.width / 2,
     y: arena.y + arena.height / 2,
     radius: cfg.player.radius,
     lives: cfg.player.lives,
     invulnerableMs: 0,
   };
+  const idle = () => ({ activeMs: 0, cooldownMs: 0 });
+  const abilities: Record<AbilityId, { activeMs: number; cooldownMs: number }> = {
+    shield: idle(),
+    slow: idle(),
+    teleport: idle(),
+    magnet: idle(),
+  };
 
-  const hazards: Hazard[] = [];
-  for (let i = 0; i < cfg.hazard.count; i++) {
-    hazards.push(spawnHazard(rng, player, cfg));
-  }
-
-  return { status: 'ready', timeMs: 0, player, hazards, seed, rng };
+  return {
+    status: 'ready',
+    timeMs: 0,
+    player,
+    drifters: [],
+    traps: [],
+    orbs: [],
+    barriers: placeBarriers(rng, player, cfg),
+    energy: 0,
+    orbsCollected: 0,
+    abilities,
+    spawn: {
+      drifterMs: cfg.drifters.firstSpawnMs,
+      trapMs: cfg.traps.firstSpawnMs,
+      orbMs: cfg.orbs.firstSpawnMs,
+    },
+    seed,
+    rng,
+  };
 }
 
 /** Leaves the 'ready' screen and starts the clock. */
@@ -83,81 +63,164 @@ export function stepGame(
   dtMs: number,
   cfg: Config = CONFIG,
 ): StepResult {
-  if (state.status !== 'playing') return NO_EVENTS;
+  const result: StepResult = { hit: false, shieldBlocked: false, pickups: [], gameOver: false };
+  if (state.status !== 'playing') return result;
 
   const dt = dtMs / 1000;
+
+  tickTimers(state, dtMs);
+  movePlayer(state, input, dt, cfg);
+  spawnThings(state, dtMs, cfg);
+  updateDrifters(state, dt, dtMs, cfg);
+  updateTraps(state, dtMs);
+  updateOrbs(state, dt, dtMs, cfg, result);
+  state.timeMs += dtMs;
+  checkDamage(state, cfg, result);
+
+  return result;
+}
+
+function tickTimers(state: GameState, dtMs: number): void {
+  const p = state.player;
+  p.invulnerableMs = Math.max(0, p.invulnerableMs - dtMs);
+  for (const ability of Object.values(state.abilities)) {
+    ability.activeMs = Math.max(0, ability.activeMs - dtMs);
+    ability.cooldownMs = Math.max(0, ability.cooldownMs - dtMs);
+  }
+}
+
+function movePlayer(state: GameState, input: InputState, dt: number, cfg: Config): void {
   const { arena } = cfg;
   const p = state.player;
 
-  if (p.invulnerableMs > 0) p.invulnerableMs = Math.max(0, p.invulnerableMs - dtMs);
-
-  // Player movement. Normalising makes diagonals exactly as fast as straight lines.
+  // Normalising makes diagonals exactly as fast as straight lines.
   const length = Math.hypot(input.dx, input.dy);
   if (length > 0) {
     p.x += (input.dx / length) * cfg.player.speed * dt;
     p.y += (input.dy / length) * cfg.player.speed * dt;
   }
+
+  // Walls push the player out (twice, so corners between two walls settle cleanly).
+  for (let pass = 0; pass < 2; pass++) {
+    for (const barrier of state.barriers) pushCircleOutOfRect(p, barrier);
+  }
+
   p.x = clamp(p.x, arena.x + p.radius, arena.x + arena.width - p.radius);
   p.y = clamp(p.y, arena.y + p.radius, arena.y + arena.height - p.radius);
-
-  for (const h of state.hazards) moveAndBounce(h, dt, cfg);
-
-  state.timeMs += dtMs;
-
-  // Collision with hazards. Only one life can be lost per step, and none while invulnerable.
-  if (p.invulnerableMs <= 0 && state.hazards.some((h) => circleHitsCircle(p, h))) {
-    p.lives--;
-    if (p.lives <= 0) {
-      p.lives = 0;
-      state.status = 'gameover';
-      return { hit: true, gameOver: true };
-    }
-    p.invulnerableMs = cfg.player.invulnerableMs;
-    return { hit: true, gameOver: false };
-  }
-
-  return NO_EVENTS;
 }
 
-function moveAndBounce(h: Hazard, dt: number, cfg: Config): void {
+/** Counts down the spawn timers and creates new obstacles, traps and orbs. */
+function spawnThings(state: GameState, dtMs: number, cfg: Config): void {
+  const { rng } = state;
+  const s = state.spawn;
+  s.drifterMs -= dtMs;
+  s.trapMs -= dtMs;
+  s.orbMs -= dtMs;
+
+  if (s.drifterMs <= 0) {
+    const drifter = state.drifters.length < cfg.drifters.max ? spawnDrifter(rng, state.player, cfg) : null;
+    if (drifter) state.drifters.push(drifter);
+    s.drifterMs = drifter ? rng.range(...cfg.drifters.intervalMs) : 300; // retry soon if nothing fit
+  }
+  if (s.trapMs <= 0) {
+    const trap = state.traps.length < cfg.traps.max ? spawnTrap(state, cfg) : null;
+    if (trap) state.traps.push(trap);
+    s.trapMs = trap ? rng.range(...cfg.traps.intervalMs) : 1000;
+  }
+  if (s.orbMs <= 0) {
+    const orb = state.orbs.length < cfg.orbs.max ? spawnOrb(state, cfg) : null;
+    if (orb) state.orbs.push(orb);
+    s.orbMs = orb ? rng.range(...cfg.orbs.intervalMs) : 1000;
+  }
+}
+
+function updateDrifters(state: GameState, dt: number, dtMs: number, cfg: Config): void {
   const { arena } = cfg;
-  h.x += h.vx * dt;
-  h.y += h.vy * dt;
+  const speedFactor = state.abilities.slow.activeMs > 0 ? cfg.abilities.slow.factor : 1;
 
-  const minX = arena.x + h.radius;
-  const maxX = arena.x + arena.width - h.radius;
-  const minY = arena.y + h.radius;
-  const maxY = arena.y + arena.height - h.radius;
-
-  if (h.x < minX) { h.x = minX; h.vx = Math.abs(h.vx); }
-  else if (h.x > maxX) { h.x = maxX; h.vx = -Math.abs(h.vx); }
-  if (h.y < minY) { h.y = minY; h.vy = Math.abs(h.vy); }
-  else if (h.y > maxY) { h.y = maxY; h.vy = -Math.abs(h.vy); }
-}
-
-/** Places a hazard at a random spot that is never too close to the player. */
-function spawnHazard(rng: Rng, player: Player, cfg: Config): Hazard {
-  const { arena, hazard } = cfg;
-  const minX = arena.x + hazard.radius;
-  const maxX = arena.x + arena.width - hazard.radius;
-  const minY = arena.y + hazard.radius;
-  const maxY = arena.y + arena.height - hazard.radius;
-
-  let x = minX;
-  let y = minY;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    x = rng.range(minX, maxX);
-    y = rng.range(minY, maxY);
-    if (Math.hypot(x - player.x, y - player.y) >= hazard.minSpawnDistance) break;
+  for (const d of state.drifters) {
+    if (d.warningMs > 0) {
+      d.warningMs = Math.max(0, d.warningMs - dtMs); // the warning is never slowed
+    } else {
+      d.x += d.vx * dt * speedFactor;
+      d.y += d.vy * dt * speedFactor;
+    }
   }
 
-  // Avoid near-horizontal/vertical paths, which look boring and are easy to camp.
-  const angle = rng.range(0.3, Math.PI / 2 - 0.3) + rng.int(0, 3) * (Math.PI / 2);
-  return {
-    x,
-    y,
-    vx: Math.cos(angle) * hazard.speed,
-    vy: Math.sin(angle) * hazard.speed,
-    radius: hazard.radius,
-  };
+  // Remove obstacles that have left the arena.
+  const leeway = 8;
+  state.drifters = state.drifters.filter(
+    (d) =>
+      d.x > arena.x - d.radius - leeway &&
+      d.x < arena.x + arena.width + d.radius + leeway &&
+      d.y > arena.y - d.radius - leeway &&
+      d.y < arena.y + arena.height + d.radius + leeway,
+  );
+}
+
+function updateTraps(state: GameState, dtMs: number): void {
+  for (const trap of state.traps) {
+    if (trap.warningMs > 0) trap.warningMs = Math.max(0, trap.warningMs - dtMs);
+    else trap.activeMs = Math.max(0, trap.activeMs - dtMs);
+  }
+  state.traps = state.traps.filter((t) => t.warningMs > 0 || t.activeMs > 0);
+}
+
+function updateOrbs(state: GameState, dt: number, dtMs: number, cfg: Config, result: StepResult): void {
+  const p = state.player;
+  const magnet = cfg.abilities.magnet;
+  const magnetOn = state.abilities.magnet.activeMs > 0;
+
+  for (const orb of state.orbs) {
+    orb.ttlMs -= dtMs;
+    if (!magnetOn) continue;
+    const dx = p.x - orb.x;
+    const dy = p.y - orb.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0 && dist < magnet.radius) {
+      const move = Math.min(dist, magnet.pullSpeed * dt);
+      orb.x += (dx / dist) * move;
+      orb.y += (dy / dist) * move;
+    }
+  }
+
+  const remaining: GameState['orbs'] = [];
+  for (const orb of state.orbs) {
+    if (circleHitsCircle(p, { x: orb.x, y: orb.y, radius: orb.radius + 2 })) {
+      state.energy = Math.min(cfg.energy.max, state.energy + cfg.energy.perOrb);
+      state.orbsCollected++;
+      result.pickups.push({ x: orb.x, y: orb.y });
+    } else if (orb.ttlMs > 0) {
+      remaining.push(orb);
+    }
+  }
+  state.orbs = remaining;
+}
+
+/** Applies damage from moving obstacles and active traps, honouring the shield and invulnerability. */
+function checkDamage(state: GameState, cfg: Config, result: StepResult): void {
+  const p = state.player;
+  if (p.invulnerableMs > 0) return;
+
+  const touchingDrifter = state.drifters.some((d) => d.warningMs <= 0 && circleHitsCircle(p, d));
+  const touchingTrap = state.traps.some((t) => t.warningMs <= 0 && t.activeMs > 0 && circleHitsCircle(p, t));
+  if (!touchingDrifter && !touchingTrap) return;
+
+  const shield = state.abilities.shield;
+  if (shield.activeMs > 0) {
+    shield.activeMs = 0; // one hit pops the shield
+    p.invulnerableMs = cfg.abilities.shield.blockInvulnerableMs;
+    result.shieldBlocked = true;
+    return;
+  }
+
+  p.lives--;
+  result.hit = true;
+  if (p.lives <= 0) {
+    p.lives = 0;
+    state.status = 'gameover';
+    result.gameOver = true;
+  } else {
+    p.invulnerableMs = cfg.player.invulnerableMs;
+  }
 }

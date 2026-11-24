@@ -10,6 +10,7 @@ export const PALETTE = {
   pink: '#ff4fa3',
   yellow: '#f0d62a',
   indigo: '#3f4fb8',
+  lightIndigo: '#8f9bff',
   grey: '#b9bfd6',
   dimGrey: '#5b5e80',
   red: '#e8453c', // reserved for danger
@@ -38,6 +39,32 @@ export const BITMAPS = {
     '#.#######.#',
     '#.#.....#.#',
     '...##.##...',
+  ],
+  star: [
+    '...###...',
+    '.#######.',
+    '##.###.##',
+    '#########',
+    '..#####..',
+    '.#.....#.',
+    '#.......#',
+  ],
+  bug: [
+    '#.......#',
+    '.#.###.#.',
+    '..#####..',
+    '.##.#.##.',
+    '#########',
+    '#.#####.#',
+    '#.#...#.#',
+    '..##.##..',
+  ],
+  orb: [
+    '..#..',
+    '.###.',
+    '#####',
+    '.###.',
+    '..#..',
   ],
   heart: [
     '.##.##.',
@@ -70,10 +97,13 @@ export function makeSpriteTexture(
   texture.refresh();
 }
 
-/** Creates every texture the game uses. */
+/** Creates every texture the game uses. Texture keys match the core names (e.g. drifter kind). */
 export function registerTextures(scene: Phaser.Scene): void {
   makeSpriteTexture(scene, 'hero', BITMAPS.hero, PALETTE.cyan, 4);
-  makeSpriteTexture(scene, 'hazard', BITMAPS.crab, PALETTE.yellow, 4);
+  makeSpriteTexture(scene, 'crab', BITMAPS.crab, PALETTE.yellow, 4);
+  makeSpriteTexture(scene, 'star', BITMAPS.star, PALETTE.pink, 3);
+  makeSpriteTexture(scene, 'bug', BITMAPS.bug, PALETTE.grey, 4);
+  makeSpriteTexture(scene, 'orb', BITMAPS.orb, PALETTE.yellow, 3);
   makeSpriteTexture(scene, 'heart', BITMAPS.heart, PALETTE.pink, 3);
   makeSpriteTexture(scene, 'heart-empty', BITMAPS.heart, PALETTE.dimGrey, 3);
 }

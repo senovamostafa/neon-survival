@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neon Survival</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #14152b; overflow: hidden; }
+      #game { width: 100%; height: 100%; }
+      #game canvas { image-rendering: pixelated; }
+      #touch-notice {
+        display: none; height: 100%; align-items: center; justify-content: center;
+        padding: 24px; text-align: center; color: #b9bfd6; line-height: 2;
+        font-family: 'Press Start 2P', monospace; font-size: 14px;
+      }
+      @media (pointer: coarse) {
+        #game { display: none; }
+        #touch-notice { display: flex; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+    <div id="touch-notice">NEON SURVIVAL<br />PLAY ON A COMPUTER<br />WITH A KEYBOARD</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

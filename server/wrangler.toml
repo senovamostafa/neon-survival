@@ -1,0 +1,22 @@
+# Cloudflare configuration for the Neon Survival room server.
+# Run locally with:  npm run server:dev        (no Cloudflare account needed)
+# Deploy later with: npx wrangler deploy --config server/wrangler.toml   (needs a free account, see README)
+
+name = "neon-survival-server"
+main = "src/worker.ts"
+compatibility_date = "2026-11-01"
+
+# One Durable Object per room. The room code is its name, so the same code always reaches the same room.
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "GameRoom"
+
+# The free plan only allows SQLite-backed Durable Objects, hence new_sqlite_classes.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]
+
+[vars]
+# Which websites may talk to the server. "*" means any (fine while developing).
+# When you deploy, set this to your game's address, e.g. "https://neon-survival.pages.dev".
+ALLOWED_ORIGINS = "*"

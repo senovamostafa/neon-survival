@@ -2,7 +2,7 @@
 
 A retro-pixel arcade game for the browser. **3 to 10 players share one arena for 4 minutes and race for energy orbs. The player with the most orbs wins.**
 
-**Status: Phase 4 of 8 (multiplayer game core).** The game rules now support many players at once and you can try them locally: you against three computer-controlled bots. Playing over the internet (rooms, lobby, server) comes in the next phases.
+**Status: Phase 5 of 8 (room server).** The game rules support many players at once. You can play them locally (you against three bots), and there is now a real room server (create a room, join by code, lobby, countdown, the 4-minute match, results) that you can run on your own computer and load-test with 10 players. The browser game does not connect to it yet; that is Phase 6.
 
 ## Run it
 
@@ -87,7 +87,9 @@ src/
     sprites.ts     Pixel sprites drawn from text bitmaps, hero colours, palette.
     themes.ts      Arena colour themes, one per sector.
   main.ts      Starts Phaser.
+  net/         Messages between browser and server (protocol.ts), shared by both.
 index.html     Page shell, pixel font, "play on a computer" notice for touch devices.
+server/        The room server (Cloudflare Worker + Durable Object). See server/README.md.
 ```
 
 Why the split: the rules in `core/` never touch Phaser, so they are fast to test, behave identically on 60 Hz and 144 Hz monitors (fixed timestep), and can be reused unchanged by the server.
@@ -105,8 +107,8 @@ Why the split: the rules in `core/` never touch Phaser, so they are fast to test
 1. Game foundation (done)
 2. Survival mechanics: enemies, walls, orbs, four abilities (done; walls later became a maze)
 3. Endless gameplay: difficulty curve and arena sectors (done; the traps and the gravity, blackout and shrinking-arena events were later removed to keep it lighter)
-4. **Multiplayer game core: N players, bumping, contested orbs, respawns, 4-minute match, ranking, bots (done)**
-5. Realtime server: a Cloudflare Worker with one Durable Object per room, lobby and countdown, server game loop, state snapshots, 10-bot load test
+4. Multiplayer game core: N players, bumping, contested orbs, respawns, 4-minute match, ranking, bots (done)
+5. **Realtime server: a Cloudflare Worker with one Durable Object per room, lobby and countdown, server game loop, state snapshots, 10-player load test (done; runs locally, deploy comes in phase 8)**
 6. Online client: pixel lobby, nickname and results screens, smoothing of other players, own-player prediction
 7. Persistence: D1 database, nickname-only players, wins and best-orb-count leaderboards (all-time and weekly)
 8. Polish and deployment: chiptune sound, performance and browser testing, deploy to Cloudflare

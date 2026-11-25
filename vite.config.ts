@@ -7,7 +7,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 2000, // Phaser alone is ~1.2 MB before gzip
   },
   test: {
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'server/src/**/*.test.ts'],
     environment: 'node', // core logic is pure TypeScript, no browser needed
   },
 });

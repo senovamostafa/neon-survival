@@ -3,7 +3,8 @@ import type { Rng } from './rng';
 
 /** Shared data shapes for the game rules. No behaviour lives here. */
 
-export type GameStatus = 'ready' | 'playing' | 'gameover';
+/** ready = waiting to start, playing = the 4-minute match is running, finished = time is up. */
+export type GameStatus = 'ready' | 'playing' | 'finished';
 
 export type AbilityId = 'shield' | 'slow' | 'teleport' | 'magnet';
 
@@ -22,50 +23,32 @@ export interface Drifter {
   warningMs: number;
 }
 
+/** One square of the maze. true means there is a wall on that side. */
+export interface MazeCell {
+  n: boolean;
+  e: boolean;
+  s: boolean;
+  w: boolean;
+}
+
+/** The arena divided into a grid of corridors. cells[row][col]. */
+export interface Maze {
+  cols: number;
+  rows: number;
+  cells: MazeCell[][];
+}
+
 /** A solid wall. While warningMs > 0 it is only an outline and does not block anything yet. */
 export interface Barrier extends Rect {
   warningMs: number;
 }
 
-export type EventKind = 'gravity' | 'blackout' | 'shrink';
-export type GravityDirection = 'up' | 'down' | 'left' | 'right';
-
-/** A random arena event. It announces itself (warning) before it takes effect (active). */
-export interface ArenaEvent {
-  kind: EventKind;
-  phase: 'warning' | 'active';
-  /** Time left in the current phase. */
-  msLeft: number;
-  /** Total length of the current phase, so progress = 1 - msLeft / totalMs. */
-  totalMs: number;
-  /** Only for gravity shifts. */
-  direction?: GravityDirection;
-}
-
-/** A stationary danger zone: harmless during the warning, harmful while active. */
-export interface Trap {
-  x: number;
-  y: number;
-  radius: number;
-  warningMs: number;
-  activeMs: number;
-}
-
-/** An energy orb the player collects by touching it. */
+/** An energy orb. The first player to touch it takes it. */
 export interface Orb {
   x: number;
   y: number;
   radius: number;
   ttlMs: number;
-}
-
-export interface Player {
-  x: number;
-  y: number;
-  radius: number;
-  lives: number;
-  /** Remaining invulnerability after a hit, in ms. 0 = can be hit. */
-  invulnerableMs: number;
 }
 
 export interface AbilityState {
@@ -75,31 +58,63 @@ export interface AbilityState {
   cooldownMs: number;
 }
 
+export interface Player {
+  /** Stable identity (the server uses the player's id; local tests use 'p1', 'b1'...). */
+  id: string;
+  name: string;
+  /** Which of the hero colours this player uses. */
+  colorIndex: number;
+
+  x: number;
+  y: number;
+  radius: number;
+  lives: number;
+  /** Remaining invulnerability after a hit or a respawn, in ms. 0 = can be hit. */
+  invulnerableMs: number;
+
+  /** false while frozen after losing every life. */
+  alive: boolean;
+  /** Time left frozen before respawning (only while alive is false). */
+  respawnMs: number;
+  deaths: number;
+
+  /** Spendable energy for abilities. Spending it never lowers the score. */
+  energy: number;
+  /** The score: orbs collected this match. Never goes down. */
+  orbs: number;
+  /** Match time when the player reached their current orb count (tie-break: earlier wins). */
+  lastOrbAtMs: number | null;
+  abilities: Record<AbilityId, AbilityState>;
+
+  /** Current shove from a bump with another player (px per second, for bumpMs). */
+  bumpVx: number;
+  bumpVy: number;
+  bumpMs: number;
+
+  /** Network state. A disconnected player's hero is removed after a short while. */
+  connected: boolean;
+  awayMs: number;
+  /** false once a disconnected player has been away too long: the hero is gone. */
+  present: boolean;
+}
+
 export interface GameState {
   status: GameStatus;
-  /** Survival time in ms. Only counts while status is 'playing'. */
+  /** Match time in ms. Only counts while status is 'playing'. */
   timeMs: number;
-  player: Player;
+  players: Player[];
   drifters: Drifter[];
-  traps: Trap[];
   orbs: Orb[];
-  /** Solid walls the player cannot pass through (once their warning is over). */
+  /** The maze layout. The walls below are drawn from it, and bots use it to find their way. */
+  maze: Maze;
+  /** Solid walls nobody can pass through (once their warning is over). */
   barriers: Barrier[];
-  /** The playable area right now. Equals the arena unless a shrinking-arena event is running. */
-  bounds: Rect;
-  /** The running arena event, or null. Only one event exists at a time. */
-  event: ArenaEvent | null;
-  /** Countdown until the next event's warning begins (only counts while no event runs). */
-  nextEventMs: number;
-  lastEventKind: EventKind | null;
-  /** Which 60-second stretch of the run we are in. Each new one reshuffles the walls. */
+  /** Which 60-second stretch of the match we are in. Each new one reshuffles the walls. */
   sector: number;
-  energy: number;
-  /** Stat only: never part of the leaderboard score. */
-  orbsCollected: number;
-  abilities: Record<AbilityId, AbilityState>;
   /** Countdowns until the next spawn of each kind, in ms. */
-  spawn: { drifterMs: number; trapMs: number; orbMs: number };
+  spawn: { drifterMs: number; orbMs: number };
+  /** Time left before two players who just bumped can bump again, keyed by pair. */
+  bumpCooldowns: Record<string, number>;
   readonly seed: number;
   readonly rng: Rng;
 }
@@ -110,19 +125,33 @@ export interface InputState {
   dy: number;
 }
 
-/** What happened during a step, so the renderer can react (flash, sound, etc.). */
+/** Inputs for every player this step, keyed by player id. Missing players stand still. */
+export type InputMap = Record<string, InputState>;
+
+/** Everything the renderer or server may want to react to after one step. */
 export interface StepResult {
-  /** The player lost a life (also true on the final, fatal hit). */
-  hit: boolean;
-  /** A hit was absorbed by the shield, so no life was lost. */
-  shieldBlocked: boolean;
-  /** Positions of the orbs collected during this step. */
-  pickups: { x: number; y: number }[];
-  gameOver: boolean;
+  /** Players who lost a life (hit by an obstacle). */
+  hits: { playerId: string }[];
+  /** Players whose shield absorbed a hit. */
+  shieldBlocks: { playerId: string }[];
+  /** Orbs collected, with who took them and where they were. */
+  pickups: { playerId: string; x: number; y: number }[];
+  /** Players who lost their last life and are now frozen. */
+  deaths: { playerId: string }[];
+  /** Players who came back after being frozen. */
+  respawns: { playerId: string }[];
+  /** Pairs of players who just bumped. */
+  bumps: { a: string; b: string }[];
+  /** Where enemies flew into a wall and vanished. */
+  wallHits: { x: number; y: number }[];
+  /** The match ended during this step. */
+  finished: boolean;
 }
 
 export type AbilityFailure =
   | 'not-playing'
+  | 'unknown-player'
+  | 'down' // frozen or gone
   | 'active' // already running
   | 'cooldown'
   | 'no-energy'
@@ -131,3 +160,14 @@ export type AbilityFailure =
 export type AbilityResult =
   | { ok: true; from: { x: number; y: number }; to: { x: number; y: number } }
   | { ok: false; reason: AbilityFailure };
+
+/** One row of the final ranking. */
+export interface RankEntry {
+  rank: number;
+  playerId: string;
+  name: string;
+  orbs: number;
+  deaths: number;
+  /** Match time the player reached their final orb count, or null with 0 orbs. */
+  reachedAtMs: number | null;
+}

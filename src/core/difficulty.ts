@@ -8,8 +8,6 @@ export interface Difficulty {
   speedMin: number;
   speedMax: number;
   maxDrifters: number;
-  trapIntervalMs: number;
-  maxTraps: number;
   waveChance: number;
 }
 
@@ -36,8 +34,6 @@ export function getDifficulty(timeMs: number, cfg: Config): Difficulty {
     speedMin: mix((r) => r.speedMin),
     speedMax: mix((r) => r.speedMax),
     maxDrifters: Math.round(mix((r) => r.maxDrifters)),
-    trapIntervalMs: mix((r) => r.trapIntervalMs),
-    maxTraps: Math.round(mix((r) => r.maxTraps)),
     waveChance: timeMs < cfg.difficulty.wavesFromMs ? 0 : mix((r) => r.waveChance),
   };
 }

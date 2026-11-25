@@ -1,24 +1,23 @@
 import Phaser from 'phaser';
 import { activateAbility } from '../core/abilities';
+import { botAbility, botInput } from '../core/bots';
 import { CONFIG } from '../core/config';
 import { getDifficulty } from '../core/difficulty';
-import { GRAVITY_VECTORS, insetArena } from '../core/events';
 import { formatTime } from '../core/format';
-import { createGame, startRun, stepGame } from '../core/game';
+import { createMatch, startRun, stepGame } from '../core/game';
+import { rankPlayers } from '../core/ranking';
 import { Rng } from '../core/rng';
 import { FixedStepper } from '../core/stepper';
-import type { AbilityId, ArenaEvent, EventKind, GameState, InputState } from '../core/types';
-import { PALETTE, registerTextures } from './sprites';
+import type { AbilityId, GameState, InputMap, InputState, Player } from '../core/types';
+import { HERO_PALETTE, PALETTE, registerTextures } from './sprites';
 import { THEMES } from './themes';
-
-const EVENT_NAMES: Record<EventKind, string> = {
-  gravity: 'GRAVITY SHIFT',
-  blackout: 'BLACKOUT',
-  shrink: 'ARENA SHRINKING',
-};
 
 const FONT = '"Press Start 2P", monospace';
 const HUD_HEIGHT = CONFIG.arena.y - 8;
+
+/** This browser's player. The others are computer-controlled until the online version exists. */
+const LOCAL_ID = 'p1';
+const BOT_COUNT = 3;
 
 const hex = (color: string): number => Phaser.Display.Color.HexStringToColor(color).color;
 const COLOR = {
@@ -26,11 +25,10 @@ const COLOR = {
   hud: hex(PALETTE.hud),
   cyan: hex(PALETTE.cyan),
   yellow: hex(PALETTE.yellow),
-  indigo: hex(PALETTE.indigo),
-  lightIndigo: hex(PALETTE.lightIndigo),
   red: hex(PALETTE.red),
   dim: hex(PALETTE.dimGrey),
   white: 0xffffff,
+  slow: 0x8aa0ff,
 };
 
 type KeyName = 'W' | 'A' | 'S' | 'D' | 'SPACE' | 'ENTER' | 'ONE' | 'TWO' | 'THREE' | 'FOUR';
@@ -43,14 +41,18 @@ const ABILITY_SLOTS: { id: AbilityId; key: KeyName; label: string }[] = [
   { id: 'teleport', key: 'THREE', label: '3 WARP' },
   { id: 'magnet', key: 'FOUR', label: '4 MAGNET' },
 ];
-const SLOT = { x: 400, y: 9, width: 100, height: 30, gap: 6 };
-const ENERGY_BAR = { x: 170, y: 14, segmentWidth: 18, segmentHeight: 20, gap: 2, segments: 10 };
+const SLOT = { x: 425, y: 9, width: 100, height: 30, gap: 6 };
+const ENERGY_BAR = { x: 215, y: 14, segmentWidth: 18, segmentHeight: 20, gap: 2, segments: 10 };
+const SCOREBOARD = { width: 168, rowHeight: 12, maxRows: 10 };
 
 /**
  * The only Phaser scene. It does three jobs and holds no game rules:
- *  1. reads the keyboard,
- *  2. feeds fixed-size steps into the core game (src/core/game.ts),
+ *  1. reads the keyboard (and asks the bots what they want to do),
+ *  2. feeds fixed-size steps into the core match (src/core/game.ts),
  *  3. draws whatever the core says is true.
+ *
+ * For now it runs a local match: you plus a few bots. The online version will feed the
+ * same drawing code with state from the server instead.
  */
 export class GameScene extends Phaser.Scene {
   state!: GameState; // public only so the dev debug handle can inspect it
@@ -58,30 +60,28 @@ export class GameScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys!: KeyMap;
 
-  private hero!: Phaser.GameObjects.Image;
+  private heroSprites: Phaser.GameObjects.Image[] = [];
+  private heroNames: Phaser.GameObjects.Text[] = [];
   private drifterSprites: Phaser.GameObjects.Image[] = [];
   private orbSprites: Phaser.GameObjects.Image[] = [];
   private hearts: Phaser.GameObjects.Image[] = [];
   private timeText!: Phaser.GameObjects.Text;
+  private orbText!: Phaser.GameObjects.Text;
   private slotLabels: Phaser.GameObjects.Text[] = [];
   private slotCosts: Phaser.GameObjects.Text[] = [];
   private slotFlashUntil: Record<AbilityId, number> = { shield: 0, slow: 0, teleport: 0, magnet: 0 };
+  private scoreRows: Phaser.GameObjects.Text[] = [];
 
   private arenaGfx!: Phaser.GameObjects.Graphics;
-  private eventGfx!: Phaser.GameObjects.Graphics;
-  private maskGfx!: Phaser.GameObjects.Graphics;
+  private scoreGfx!: Phaser.GameObjects.Graphics;
   private bannerTitle!: Phaser.GameObjects.Text;
   private bannerSub!: Phaser.GameObjects.Text;
-  private indicatorText!: Phaser.GameObjects.Text;
   private statusText!: Phaser.GameObjects.Text;
   private themeIndex = 0;
   private lastSector = 0;
-  private lastEventKey = '';
   private sectorBannerUntil = 0;
-  /** Drifting specks shown during a gravity shift (visual only, so Math.random is fine here). */
-  private readonly flowDots = Array.from({ length: 44 }, () => ({ fx: Math.random(), fy: Math.random() }));
   private barrierGfx!: Phaser.GameObjects.Graphics;
-  private trapGfx!: Phaser.GameObjects.Graphics;
+  private markerGfx!: Phaser.GameObjects.Graphics;
   private ringGfx!: Phaser.GameObjects.Graphics;
   private hudGfx!: Phaser.GameObjects.Graphics;
 
@@ -94,6 +94,11 @@ export class GameScene extends Phaser.Scene {
     super('GameScene');
   }
 
+  /** The player on this screen. */
+  private get me(): Player {
+    return this.state.players[0];
+  }
+
   create(): void {
     registerTextures(this);
     this.cameras.main.setBackgroundColor(PALETTE.background);
@@ -101,21 +106,18 @@ export class GameScene extends Phaser.Scene {
     this.arenaGfx = this.add.graphics().setDepth(0);
     this.drawArena();
     this.barrierGfx = this.add.graphics().setDepth(1);
-    this.trapGfx = this.add.graphics().setDepth(2);
-    this.eventGfx = this.add.graphics().setDepth(3);
+    this.markerGfx = this.add.graphics().setDepth(2);
     this.ringGfx = this.add.graphics().setDepth(11);
-    this.maskGfx = this.add.graphics().setDepth(12);
     this.createHud();
+    this.createScoreboard();
     this.createBanners();
     this.createOverlay();
-
-    this.hero = this.add.image(0, 0, 'hero').setDepth(10);
 
     const keyboard = this.input.keyboard!;
     this.cursors = keyboard.createCursorKeys();
     this.keys = keyboard.addKeys('W,A,S,D,SPACE,ENTER,ONE,TWO,THREE,FOUR') as KeyMap;
 
-    this.newRun();
+    this.newMatch();
 
     // Dev-only debug handle (stripped from production builds): window.__scene.state
     if (import.meta.env.DEV) (window as unknown as { __scene: GameScene }).__scene = this;
@@ -140,26 +142,21 @@ export class GameScene extends Phaser.Scene {
       case 'playing': {
         for (const slot of pressed) this.tryAbility(slot.id);
 
-        const input = this.readInput();
         const steps = this.stepper.advance(deltaMs);
         for (let i = 0; i < steps; i++) {
-          const result = stepGame(this.state, input, CONFIG.timestep.stepMs);
-          for (const pickup of result.pickups) this.burst(pickup.x, pickup.y, COLOR.yellow, 6);
-          if (result.shieldBlocked) {
-            this.burst(this.state.player.x, this.state.player.y, COLOR.cyan, 12);
-            this.cameras.main.shake(80, 0.004);
-          }
-          if (result.hit) this.cameras.main.shake(150, 0.008);
-          if (result.gameOver) {
-            this.showGameOver();
+          this.runBots();
+          const result = stepGame(this.state, this.collectInputs(), CONFIG.timestep.stepMs);
+          this.showResult(result);
+          if (result.finished) {
+            this.showResults();
             break;
           }
         }
         break;
       }
 
-      case 'gameover':
-        if (confirm) this.newRun();
+      case 'finished':
+        if (confirm) this.newMatch();
         break;
     }
 
@@ -176,9 +173,26 @@ export class GameScene extends Phaser.Scene {
     return { dx: Number(right) - Number(left), dy: Number(down) - Number(up) };
   }
 
-  /** Asks the core to use an ability and shows feedback for success or refusal. */
+  /** Keyboard for you, the bot brain for everyone else. */
+  private collectInputs(): InputMap {
+    const inputs: InputMap = {};
+    for (const p of this.state.players) {
+      inputs[p.id] = p.id === LOCAL_ID ? this.readInput() : botInput(this.state, p.id);
+    }
+    return inputs;
+  }
+
+  private runBots(): void {
+    for (const p of this.state.players) {
+      if (p.id === LOCAL_ID) continue;
+      const ability = botAbility(this.state, p.id);
+      if (ability) activateAbility(this.state, p.id, ability);
+    }
+  }
+
+  /** Asks the core to use one of your abilities and shows feedback for success or refusal. */
   private tryAbility(id: AbilityId): void {
-    const result = activateAbility(this.state, id);
+    const result = activateAbility(this.state, LOCAL_ID, id);
     if (!result.ok) {
       this.slotFlashUntil[id] = this.time.now + 300; // red flash on the HUD slot
       return;
@@ -191,43 +205,78 @@ export class GameScene extends Phaser.Scene {
       case 'slow':
         this.cameras.main.flash(150, 138, 160, 255);
         break;
-      case 'teleport':
+      case 'teleport': {
         this.burst(result.from.x, result.from.y, COLOR.cyan, 14);
         this.burst(result.to.x, result.to.y, COLOR.cyan, 14);
-        this.hero.setScale(1.8);
-        this.tweens.add({ targets: this.hero, scale: 1, duration: 220 });
+        const hero = this.heroSprites[0];
+        hero.setScale(1.8);
+        this.tweens.add({ targets: hero, scale: 1, duration: 220 });
         break;
+      }
       case 'magnet':
         this.burst(result.to.x, result.to.y, COLOR.yellow, 10);
         break;
     }
   }
 
-  // ---- run lifecycle -----------------------------------------------------
+  /** Turns what happened in a step into sparks and screen shakes. */
+  private showResult(result: ReturnType<typeof stepGame>): void {
+    const at = (id: string) => this.state.players.find((p) => p.id === id)!;
 
-  /** Builds a fresh game and shows the "press space" screen. No page reload needed. */
-  private newRun(): void {
-    this.state = createGame(Rng.randomSeed());
+    for (const pickup of result.pickups) this.burst(pickup.x, pickup.y, hex(HERO_PALETTE[at(pickup.playerId).colorIndex]), 6);
+    for (const b of result.shieldBlocks) {
+      const p = at(b.playerId);
+      this.burst(p.x, p.y, COLOR.cyan, 12);
+      if (p.id === LOCAL_ID) this.cameras.main.shake(80, 0.004);
+    }
+    for (const h of result.hits) if (h.playerId === LOCAL_ID) this.cameras.main.shake(150, 0.008);
+    for (const d of result.deaths) {
+      const p = at(d.playerId);
+      this.burst(p.x, p.y, COLOR.red, 14);
+      if (p.id === LOCAL_ID) this.cameras.main.shake(300, 0.012);
+    }
+    for (const r of result.respawns) {
+      const p = at(r.playerId);
+      this.burst(p.x, p.y, COLOR.cyan, 12);
+    }
+    for (const w of result.wallHits) this.burst(w.x, w.y, COLOR.dim, 5);
+    for (const b of result.bumps) {
+      const a = at(b.a);
+      const c = at(b.b);
+      this.burst((a.x + c.x) / 2, (a.y + c.y) / 2, COLOR.white, 6);
+    }
+  }
+
+  // ---- match lifecycle ---------------------------------------------------
+
+  /** Builds a fresh local match (you plus bots) and shows the "press space" screen. */
+  private newMatch(): void {
+    const roster = [
+      { id: LOCAL_ID, name: 'YOU' },
+      ...Array.from({ length: BOT_COUNT }, (_, i) => ({ id: `b${i + 1}`, name: `BOT ${i + 1}` })),
+    ];
+    this.state = createMatch(Rng.randomSeed(), roster);
     this.stepper.reset();
     this.lastSector = 0;
-    this.lastEventKey = '';
     this.sectorBannerUntil = 0;
     this.applyTheme(0);
 
     this.overlayTitle.setText('NEON SURVIVAL');
     this.overlayBody.setText(
-      'WASD OR ARROWS TO MOVE\nGRAB ORBS FOR ENERGY\n1 SHIELD  2 SLOW  3 WARP  4 MAGNET',
+      `LOCAL MATCH: YOU + ${BOT_COUNT} BOTS\nMOST ORBS IN 4 MINUTES WINS\n\nWASD OR ARROWS TO MOVE\nENEMIES VANISH WHEN THEY HIT A WALL\n1 SHIELD  2 SLOW  3 WARP  4 MAGNET`,
     );
     this.overlayPrompt.setText('PRESS SPACE TO START');
     this.overlay.setVisible(true);
     this.syncVisuals();
   }
 
-  private showGameOver(): void {
-    this.overlayTitle.setText('GAME OVER');
-    this.overlayBody.setText(
-      `SURVIVED ${formatTime(this.state.timeMs)}\nORBS COLLECTED ${this.state.orbsCollected}`,
+  private showResults(): void {
+    const table = rankPlayers(this.state);
+    const lines = table.map(
+      (r) => `${String(r.rank).padStart(2)}. ${r.name.padEnd(7)} ${String(r.orbs).padStart(3)} ORBS`,
     );
+    this.overlayTitle.setText('MATCH OVER');
+    this.overlayBody.setText(lines.join('\n'));
     this.overlayPrompt.setText('PRESS SPACE TO PLAY AGAIN');
     this.overlay.setVisible(true);
   }
@@ -236,22 +285,48 @@ export class GameScene extends Phaser.Scene {
 
   /** Copies the core state onto the sprites. Positions are rounded to keep pixels crisp. */
   private syncVisuals(): void {
-    const { player, drifters, orbs, timeMs, abilities } = this.state;
+    const { players, drifters, orbs } = this.state;
+    const me = this.me;
     const now = this.time.now;
     const blink = Math.floor(now / 120) % 2 === 0;
 
-    this.hero.setPosition(Math.round(player.x), Math.round(player.y));
-    const blinkOff = player.invulnerableMs > 0 && Math.floor(player.invulnerableMs / 100) % 2 === 0;
-    this.hero.setAlpha(blinkOff ? 0.25 : 1);
+    // Heroes: one sprite and one name label per player.
+    this.syncPool(this.heroSprites, players.length, (i) => this.add.image(0, 0, `hero-${players[i].colorIndex}`));
+    while (this.heroNames.length < players.length) {
+      this.heroNames.push(
+        this.add
+          .text(0, 0, '', { fontFamily: FONT, fontSize: '8px', color: '#ffffff' })
+          .setOrigin(0.5)
+          .setStroke(PALETTE.hud, 3)
+          .setDepth(13),
+      );
+    }
+    players.forEach((p, i) => {
+      const sprite = this.heroSprites[i];
+      const label = this.heroNames[i];
+      sprite.setTexture(`hero-${p.colorIndex}`).setDepth(p.id === LOCAL_ID ? 10 : 9);
+      sprite.setVisible(p.present);
+      label.setVisible(p.present && p.alive);
+      if (!p.present) return;
 
-    // Moving obstacles: harmless markers blink; slow motion tints them blue.
+      sprite.setPosition(Math.round(p.x), Math.round(p.y));
+      const blinkOff = p.invulnerableMs > 0 && Math.floor(p.invulnerableMs / 100) % 2 === 0;
+      sprite.setAlpha(!p.alive ? 0.18 : blinkOff ? 0.3 : 1);
+      label
+        .setText(p.name)
+        .setColor(HERO_PALETTE[p.colorIndex])
+        .setPosition(Math.round(p.x), Math.round(p.y) - 24);
+    });
+
+    // Moving obstacles: harmless markers blink; any active slow-motion zone tints the ones inside it.
     this.syncPool(this.drifterSprites, drifters.length, () => this.add.image(0, 0, 'crab').setDepth(5));
-    const slowed = abilities.slow.activeMs > 0;
+    const zones = players.filter((p) => p.present && p.alive && p.abilities.slow.activeMs > 0);
     drifters.forEach((d, i) => {
       const sprite = this.drifterSprites[i];
       sprite.setTexture(d.kind).setPosition(Math.round(d.x), Math.round(d.y));
       sprite.setAlpha(d.warningMs > 0 ? (blink ? 0.9 : 0.3) : 1);
-      if (slowed) sprite.setTint(0x8aa0ff);
+      const slowed = zones.some((p) => Math.hypot(d.x - p.x, d.y - p.y) <= CONFIG.abilities.slow.radius);
+      if (slowed) sprite.setTint(COLOR.slow);
       else sprite.clearTint();
     });
 
@@ -263,22 +338,21 @@ export class GameScene extends Phaser.Scene {
         .setAlpha(o.ttlMs < 3000 && blink ? 0.3 : 1);
     });
 
-    this.timeText.setText(formatTime(timeMs));
-    this.hearts.forEach((heart, i) =>
-      heart.setTexture(i < player.lives ? 'heart' : 'heart-empty'),
-    );
+    const remaining = Math.max(0, CONFIG.match.durationMs - this.state.timeMs);
+    this.timeText.setText(formatTime(Math.ceil(remaining / 1000) * 1000));
+    this.orbText.setText(`ORB ${me.orbs}`);
+    this.hearts.forEach((heart, i) => heart.setTexture(i < me.lives ? 'heart' : 'heart-empty'));
 
     this.handleSectorChange(now);
-    this.handleEventChange();
     this.drawBarriers(now);
-    this.drawTrapsAndMarkers(now);
-    this.drawEventEffects(now);
+    this.drawMarkers();
     this.drawRings(now);
     this.drawHud(now);
+    this.drawScoreboard();
     this.updateBanners(now);
   }
 
-  // ---- sectors and events ------------------------------------------------
+  // ---- sectors -----------------------------------------------------------
 
   /** A new sector means a new colour theme, a flash and a banner. */
   private handleSectorChange(now: number): void {
@@ -290,184 +364,34 @@ export class GameScene extends Phaser.Scene {
     this.sectorBannerUntil = now + 2500;
   }
 
-  /** Reacts to an event starting its warning or taking effect (shake and flash). */
-  private handleEventChange(): void {
-    const ev = this.state.event;
-    const key = ev ? `${ev.kind}:${ev.phase}` : '';
-    if (key === this.lastEventKey) return;
-    this.lastEventKey = key;
-    if (!ev) return;
-
-    if (ev.phase === 'warning') {
-      this.cameras.main.flash(250, 232, 69, 60);
-    } else if (ev.kind === 'gravity') {
-      this.cameras.main.shake(250, 0.005);
-    } else if (ev.kind === 'shrink') {
-      this.cameras.main.shake(350, 0.006);
-    }
-  }
-
   private applyTheme(index: number): void {
     this.themeIndex = index % THEMES.length;
     this.cameras.main.setBackgroundColor(THEMES[this.themeIndex].background);
     this.drawArena();
   }
 
-  /** Arrows, drifting specks, the closing walls and the blackout mask. */
-  private drawEventEffects(now: number): void {
-    const g = this.eventGfx;
-    const mask = this.maskGfx;
-    g.clear();
-    mask.clear();
-    const ev = this.state.event;
-    if (!ev) return;
-
-    const { arena } = CONFIG;
-    const blink = Math.floor(now / 250) % 2 === 0;
-
-    if (ev.kind === 'gravity' && ev.direction) {
-      const dir = GRAVITY_VECTORS[ev.direction];
-      if (ev.phase === 'warning') {
-        if (blink) this.drawArrow(g, arena.x + arena.width / 2, arena.y + arena.height / 2, dir, 12, COLOR.yellow, 0.9);
-      } else {
-        // Specks stream in the pull direction.
-        g.fillStyle(COLOR.white, 0.35);
-        const seconds = now / 1000;
-        for (const dot of this.flowDots) {
-          const x = arena.x + this.wrap(dot.fx * arena.width + dir.x * 160 * seconds, arena.width);
-          const y = arena.y + this.wrap(dot.fy * arena.height + dir.y * 160 * seconds, arena.height);
-          if (dir.x !== 0) g.fillRect(Math.round(x), Math.round(y), 12, 2);
-          else g.fillRect(Math.round(x), Math.round(y), 2, 12);
-        }
-        this.drawArrow(g, this.state.player.x + dir.x * 34, this.state.player.y + dir.y * 34, dir, 3, COLOR.yellow, 0.8);
-      }
-    }
-
-    if (ev.kind === 'shrink') {
-      if (ev.phase === 'warning') {
-        // Dotted outline of where the walls will stop.
-        if (blink) this.dottedRect(g, insetArena(CONFIG, 1), COLOR.red);
-      } else {
-        const b = this.state.bounds;
-        g.fillStyle(0x3a0f14, 0.85);
-        g.fillRect(arena.x, arena.y, arena.width, b.y - arena.y); // top
-        g.fillRect(arena.x, b.y + b.height, arena.width, arena.y + arena.height - (b.y + b.height)); // bottom
-        g.fillRect(arena.x, b.y, b.x - arena.x, b.height); // left
-        g.fillRect(b.x + b.width, b.y, arena.x + arena.width - (b.x + b.width), b.height); // right
-        g.lineStyle(3, COLOR.red, 1);
-        g.strokeRect(b.x, b.y, b.width, b.height);
-      }
-    }
-
-    if (ev.kind === 'blackout') {
-      if (ev.phase === 'warning') {
-        if (blink) {
-          const p = this.state.player;
-          this.ringDots(g, p.x, p.y, CONFIG.events.blackout.visibleRadius, 40, 4, COLOR.white, 0.8);
-        }
-      } else {
-        this.drawBlackoutMask(ev);
-      }
-    }
-  }
-
-  /** Dark cover over the arena with a pixel-stepped hole around the hero. */
-  private drawBlackoutMask(ev: ArenaEvent): void {
-    const { arena } = CONFIG;
-    const { visibleRadius, fadeMs } = CONFIG.events.blackout;
-    const p = this.state.player;
-    const elapsed = ev.totalMs - ev.msLeft;
-    let darkness = 1; // 0 = fully visible, 1 = fully dark
-    if (elapsed < fadeMs) darkness = elapsed / fadeMs;
-    else if (ev.msLeft < fadeMs) darkness = ev.msLeft / fadeMs;
-    const radius = visibleRadius + (500 - visibleRadius) * (1 - darkness);
-
-    const g = this.maskGfx;
-    const cell = 8;
-    g.fillStyle(COLOR.hud, 0.88); // not fully opaque: far shapes stay faintly visible
-    const bottom = arena.y + arena.height;
-    for (let y = arena.y; y < bottom; y += cell) {
-      const h = Math.min(cell, bottom - y);
-      const dy = y + cell / 2 - p.y;
-      if (Math.abs(dy) >= radius) {
-        g.fillRect(arena.x, y, arena.width, h);
-        continue;
-      }
-      const half = Math.sqrt(radius * radius - dy * dy);
-      const left = Math.max(arena.x, Math.round((p.x - half) / cell) * cell);
-      const right = Math.min(arena.x + arena.width, Math.round((p.x + half) / cell) * cell);
-      if (left > arena.x) g.fillRect(arena.x, y, left - arena.x, h);
-      if (right < arena.x + arena.width) g.fillRect(right, y, arena.x + arena.width - right, h);
-    }
-  }
-
-  /** A pixel arrow made of small squares, pointing along `dir`. */
-  private drawArrow(
-    g: Phaser.GameObjects.Graphics,
-    cx: number,
-    cy: number,
-    dir: { x: number; y: number },
-    block: number,
-    color: number,
-    alpha: number,
-  ): void {
-    const cells: [number, number][] = [[-3, 0], [-2, 0], [-1, 0], [0, 0], [1, -2], [1, -1], [1, 0], [1, 1], [1, 2], [2, -1], [2, 0], [2, 1], [3, 0]];
-    g.fillStyle(color, alpha);
-    for (const [u, v] of cells) {
-      const x = cx + (dir.x * u - dir.y * v) * block;
-      const y = cy + (dir.y * u + dir.x * v) * block;
-      g.fillRect(Math.round(x - block / 2), Math.round(y - block / 2), block, block);
-    }
-  }
-
-  /** Outline made of small squares around a rectangle. */
-  private dottedRect(g: Phaser.GameObjects.Graphics, r: { x: number; y: number; width: number; height: number }, color: number): void {
-    g.fillStyle(color, 1);
-    const step = 12;
-    for (let x = r.x; x <= r.x + r.width; x += step) {
-      g.fillRect(Math.round(x) - 2, Math.round(r.y) - 2, 4, 4);
-      g.fillRect(Math.round(x) - 2, Math.round(r.y + r.height) - 2, 4, 4);
-    }
-    for (let y = r.y; y <= r.y + r.height; y += step) {
-      g.fillRect(Math.round(r.x) - 2, Math.round(y) - 2, 4, 4);
-      g.fillRect(Math.round(r.x + r.width) - 2, Math.round(y) - 2, 4, 4);
-    }
-  }
-
-  private wrap(value: number, size: number): number {
-    return ((value % size) + size) % size;
-  }
-
-  /** Event warning banner, live-event indicator, sector banner and the level/sector status line. */
+  /** "You are down" and sector banners, and the status line. */
   private updateBanners(now: number): void {
     const state = this.state;
-    const ev = state.event;
+    const me = this.me;
     const secs = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
 
     let title = '';
     let sub = '';
-    if (ev && ev.phase === 'warning') {
-      title = `WARNING: ${EVENT_NAMES[ev.kind]}`;
-      const n = secs(ev.msLeft);
-      if (ev.kind === 'gravity') sub = `PULLING ${ev.direction?.toUpperCase()} IN ${n}`;
-      else if (ev.kind === 'blackout') sub = `LIGHTS OUT IN ${n}`;
-      else sub = `WALLS CLOSING IN ${n}`;
-    } else if (now < this.sectorBannerUntil) {
+    let color: string = PALETTE.red;
+    if (state.status === 'playing' && me.present && !me.alive) {
+      title = 'YOU ARE DOWN';
+      sub = `BACK IN ${secs(me.respawnMs)}`;
+      color = PALETTE.yellow;
+    } else if (now < this.sectorBannerUntil && state.status !== 'finished') {
       title = `SECTOR ${state.sector + 1}`;
       sub = THEMES[this.themeIndex].name.toUpperCase();
     }
-    this.bannerTitle.setText(title).setVisible(title !== '');
+    this.bannerTitle.setText(title).setColor(color).setVisible(title !== '');
     this.bannerSub.setText(sub).setVisible(title !== '');
-    this.bannerTitle.setAlpha(ev && ev.phase === 'warning' && Math.floor(now / 250) % 2 === 0 ? 0.45 : 1);
-
-    let indicator = '';
-    if (ev && ev.phase === 'active') {
-      indicator = `${EVENT_NAMES[ev.kind]}${ev.kind === 'gravity' ? ` ${ev.direction?.toUpperCase()}` : ''}  ${secs(ev.msLeft)}S`;
-    }
-    this.indicatorText.setText(indicator).setVisible(indicator !== '');
 
     const tier = getDifficulty(state.timeMs, CONFIG).tier.toUpperCase();
-    this.statusText.setText(`LEVEL ${tier}   SECTOR ${state.sector + 1}`);
+    this.statusText.setText(`LEVEL ${tier}   SECTOR ${state.sector + 1}   DEATHS ${me.deaths}`);
   }
 
   private createBanners(): void {
@@ -480,47 +404,67 @@ export class GameScene extends Phaser.Scene {
       .text(width / 2, 142, '', { fontFamily: FONT, fontSize: '12px', color: PALETTE.text })
       .setOrigin(0.5)
       .setDepth(25);
-    this.indicatorText = this.add
-      .text(width / 2, CONFIG.arena.y + 12, '', { fontFamily: FONT, fontSize: '10px', color: PALETTE.yellow })
-      .setOrigin(0.5, 0)
-      .setDepth(25);
     this.statusText = this.add
       .text(CONFIG.arena.x, CONFIG.screen.height - 9, '', { fontFamily: FONT, fontSize: '8px', color: PALETTE.dimGrey })
       .setOrigin(0, 0.5)
       .setDepth(25);
   }
 
+  // ---- scoreboard --------------------------------------------------------
+
+  private createScoreboard(): void {
+    this.scoreGfx = this.add.graphics().setDepth(24);
+    for (let i = 0; i < SCOREBOARD.maxRows; i++) {
+      this.scoreRows.push(
+        this.add.text(0, 0, '', { fontFamily: FONT, fontSize: '8px', color: '#ffffff' }).setDepth(25).setVisible(false),
+      );
+    }
+  }
+
+  /** Live standings in the corner of the arena. */
+  private drawScoreboard(): void {
+    const { arena } = CONFIG;
+    const table = rankPlayers(this.state);
+    const x = arena.x + arena.width - SCOREBOARD.width - 6;
+    const y = arena.y + 6;
+    const g = this.scoreGfx;
+    g.clear();
+    g.fillStyle(COLOR.hud, 0.62);
+    g.fillRect(x, y, SCOREBOARD.width, table.length * SCOREBOARD.rowHeight + 8);
+
+    this.scoreRows.forEach((row, i) => {
+      const entry = table[i];
+      if (!entry) {
+        row.setVisible(false);
+        return;
+      }
+      const player = this.state.players.find((p) => p.id === entry.playerId)!;
+      const you = player.id === LOCAL_ID ? '>' : ' ';
+      const name = entry.name.slice(0, 7).padEnd(7);
+      row
+        .setVisible(true)
+        .setText(`${you}${entry.rank} ${name} ${String(entry.orbs).padStart(3)}`)
+        .setColor(player.present ? HERO_PALETTE[player.colorIndex] : PALETTE.dimGrey)
+        .setPosition(x + 6, y + 6 + i * SCOREBOARD.rowHeight);
+    });
+  }
+
+  // ---- pools and shapes --------------------------------------------------
+
   /** Grows or shrinks a pool of sprites to `count` and hides the unused ones. */
   private syncPool(
     pool: Phaser.GameObjects.Image[],
     count: number,
-    make: () => Phaser.GameObjects.Image,
+    make: (index: number) => Phaser.GameObjects.Image,
   ): void {
-    while (pool.length < count) pool.push(make());
+    while (pool.length < count) pool.push(make(pool.length));
     pool.forEach((sprite, i) => sprite.setVisible(i < count));
   }
 
-  /** Danger zones, plus the direction arrows shown for obstacles that are about to move. */
-  private drawTrapsAndMarkers(now: number): void {
-    const g = this.trapGfx;
+  /** Direction dots shown next to an obstacle that is about to start moving. */
+  private drawMarkers(): void {
+    const g = this.markerGfx;
     g.clear();
-    const blink = Math.floor(now / 150) % 2 === 0;
-
-    for (const t of this.state.traps) {
-      if (t.warningMs > 0) {
-        if (blink) this.ringDots(g, t.x, t.y, t.radius, 36, 4, COLOR.red, 1);
-      } else {
-        const fading = t.activeMs < 1000 && blink;
-        g.fillStyle(COLOR.red, fading ? 0.1 : 0.25);
-        g.fillCircle(Math.round(t.x), Math.round(t.y), t.radius);
-        this.ringDots(g, t.x, t.y, t.radius, 36, 4, COLOR.red, 1);
-        g.fillStyle(COLOR.red, 1); // a pixel "X" in the middle
-        for (let k = -2; k <= 2; k++) {
-          g.fillRect(Math.round(t.x) + k * 4 - 2, Math.round(t.y) + k * 4 - 2, 4, 4);
-          g.fillRect(Math.round(t.x) + k * 4 - 2, Math.round(t.y) - k * 4 - 2, 4, 4);
-        }
-      }
-    }
 
     // Four dots show where a warning obstacle is about to go.
     g.fillStyle(COLOR.white, 0.7);
@@ -534,36 +478,45 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Shield square and magnet range, drawn around the hero. */
+  /** Shield squares, magnet range and slow-motion zones, drawn around every player who has them on. */
   private drawRings(now: number): void {
     const g = this.ringGfx;
     g.clear();
-    const { player, abilities } = this.state;
-    const x = Math.round(player.x);
-    const y = Math.round(player.y);
     const blink = Math.floor(now / 120) % 2 === 0;
 
-    const shield = abilities.shield.activeMs;
-    if (shield > 0 && (shield > 1500 || blink)) {
-      g.lineStyle(3, COLOR.cyan, 1);
-      g.strokeRect(x - 22, y - 22, 44, 44);
-    }
+    for (const p of this.state.players) {
+      if (!p.present || !p.alive) continue;
+      const x = Math.round(p.x);
+      const y = Math.round(p.y);
+      const mine = p.id === LOCAL_ID;
 
-    const magnet = abilities.magnet.activeMs;
-    if (magnet > 0 && (magnet > 1500 || blink)) {
-      this.ringDots(g, x, y, CONFIG.abilities.magnet.radius, 48, 3, COLOR.yellow, 0.5);
+      const shield = p.abilities.shield.activeMs;
+      if (shield > 0 && (shield > 1500 || blink)) {
+        g.lineStyle(3, COLOR.cyan, mine ? 1 : 0.7);
+        g.strokeRect(x - 22, y - 22, 44, 44);
+      }
+
+      const magnet = p.abilities.magnet.activeMs;
+      if (magnet > 0 && (magnet > 1500 || blink)) {
+        this.ringDots(g, x, y, CONFIG.abilities.magnet.radius, 48, 3, COLOR.yellow, mine ? 0.5 : 0.3);
+      }
+
+      const slow = p.abilities.slow.activeMs;
+      if (slow > 0 && (slow > 1500 || blink)) {
+        this.ringDots(g, x, y, CONFIG.abilities.slow.radius, 64, 3, COLOR.slow, mine ? 0.5 : 0.3);
+      }
     }
   }
 
-  /** Time, energy bar and the four ability slots. Redrawn every frame; it is only a few rectangles. */
+  /** Energy bar and the four ability slots for your hero. Redrawn every frame; it is only a few rectangles. */
   private drawHud(now: number): void {
     const g = this.hudGfx;
     g.clear();
-    const state = this.state;
+    const me = this.me;
 
     // Energy bar: ten blocks, each worth a tenth of the maximum.
     const perBlock = CONFIG.energy.max / ENERGY_BAR.segments;
-    const filled = Math.floor(state.energy / perBlock);
+    const filled = Math.floor(me.energy / perBlock);
     for (let i = 0; i < ENERGY_BAR.segments; i++) {
       const x = ENERGY_BAR.x + i * (ENERGY_BAR.segmentWidth + ENERGY_BAR.gap);
       g.fillStyle(i < filled ? COLOR.cyan : COLOR.dim, i < filled ? 1 : 0.35);
@@ -572,10 +525,10 @@ export class GameScene extends Phaser.Scene {
 
     ABILITY_SLOTS.forEach((slot, i) => {
       const spec = CONFIG.abilities[slot.id];
-      const ability = state.abilities[slot.id];
+      const ability = me.abilities[slot.id];
       const x = SLOT.x + i * (SLOT.width + SLOT.gap);
-      const affordable = state.energy >= spec.cost;
-      const ready = affordable && ability.cooldownMs <= 0 && ability.activeMs <= 0;
+      const affordable = me.energy >= spec.cost;
+      const ready = affordable && me.alive && ability.cooldownMs <= 0 && ability.activeMs <= 0;
       const flashing = now < this.slotFlashUntil[slot.id];
       const active = ability.activeMs > 0;
 
@@ -623,7 +576,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** A quick burst of little squares flying outwards, used for pickups, shield and teleport. */
+  /** A quick burst of little squares flying outwards, used for pickups, shield, bumps and teleport. */
   private burst(x: number, y: number, color: number, count: number): void {
     for (let i = 0; i < count; i++) {
       const angle = (i / count) * Math.PI * 2;
@@ -691,10 +644,17 @@ export class GameScene extends Phaser.Scene {
     bg.fillRect(0, HUD_HEIGHT, CONFIG.screen.width, 2);
     this.hudGfx = this.add.graphics().setDepth(21);
 
-    const style = { fontFamily: FONT, fontSize: '20px', color: PALETTE.text };
-    this.timeText = this.add.text(20, HUD_HEIGHT / 2, '00:00', style).setOrigin(0, 0.5).setDepth(22);
+    const mid = HUD_HEIGHT / 2;
+    this.timeText = this.add
+      .text(20, mid, '04:00', { fontFamily: FONT, fontSize: '16px', color: PALETTE.text })
+      .setOrigin(0, 0.5)
+      .setDepth(22);
+    this.orbText = this.add
+      .text(112, mid, 'ORB 0', { fontFamily: FONT, fontSize: '10px', color: PALETTE.yellow })
+      .setOrigin(0, 0.5)
+      .setDepth(22);
     this.add
-      .text(ENERGY_BAR.x - 10, HUD_HEIGHT / 2, 'EN', { fontFamily: FONT, fontSize: '10px', color: PALETTE.grey })
+      .text(ENERGY_BAR.x - 10, mid, 'EN', { fontFamily: FONT, fontSize: '10px', color: PALETTE.grey })
       .setOrigin(1, 0.5)
       .setDepth(22);
 
@@ -712,24 +672,22 @@ export class GameScene extends Phaser.Scene {
 
     const heartsX = CONFIG.screen.width - 20 - 3 * 30;
     for (let i = 0; i < CONFIG.player.lives; i++) {
-      this.hearts.push(
-        this.add.image(heartsX + i * 30, HUD_HEIGHT / 2, 'heart').setOrigin(0, 0.5).setDepth(22),
-      );
+      this.hearts.push(this.add.image(heartsX + i * 30, mid, 'heart').setOrigin(0, 0.5).setDepth(22));
     }
   }
 
   private createOverlay(): void {
     const { width, height } = CONFIG.screen;
-    const dim = this.add.rectangle(0, 0, width, height, COLOR.hud, 0.82).setOrigin(0, 0);
+    const dim = this.add.rectangle(0, 0, width, height, COLOR.hud, 0.86).setOrigin(0, 0);
 
     this.overlayTitle = this.add
-      .text(width / 2, 190, '', { fontFamily: FONT, fontSize: '36px', color: PALETTE.cyan })
+      .text(width / 2, 110, '', { fontFamily: FONT, fontSize: '32px', color: PALETTE.cyan })
       .setOrigin(0.5);
     this.overlayBody = this.add
-      .text(width / 2, 285, '', { fontFamily: FONT, fontSize: '14px', color: PALETTE.text, align: 'center', lineSpacing: 14 })
+      .text(width / 2, 275, '', { fontFamily: FONT, fontSize: '12px', color: PALETTE.text, align: 'center', lineSpacing: 10 })
       .setOrigin(0.5);
     this.overlayPrompt = this.add
-      .text(width / 2, 390, '', { fontFamily: FONT, fontSize: '16px', color: PALETTE.yellow })
+      .text(width / 2, 455, '', { fontFamily: FONT, fontSize: '16px', color: PALETTE.yellow })
       .setOrigin(0.5);
 
     this.tweens.add({ targets: this.overlayPrompt, alpha: 0.2, duration: 600, yoyo: true, repeat: -1 });

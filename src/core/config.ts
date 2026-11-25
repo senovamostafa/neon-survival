@@ -19,9 +19,6 @@ export interface DifficultyKeyframe {
   speedMin: number;
   speedMax: number;
   maxDrifters: number;
-  /** Typical gap between new danger zones. */
-  trapIntervalMs: number;
-  maxTraps: number;
   /** Chance that a spawn is a wave of 2-3 obstacles instead of a single one. */
   waveChance: number;
 }
@@ -40,16 +37,50 @@ export const CONFIG = {
     maxFrameMs: 100,
   },
 
+  /** The match: a fixed-length race for orbs between 3 to 10 players. */
+  match: {
+    durationMs: 240_000, // 4 minutes
+    minPlayers: 3, // needed to start a real match (the core itself works with any number)
+    maxPlayers: 10,
+    countdownMs: 5000,
+    /** Players start spread on an ellipse this fraction of the arena size from the centre. */
+    spawnRingFraction: 0.28,
+  },
+
   player: {
     speed: 180, // px per second, same in every direction
     radius: 9, // collision circle (the sprite is slightly bigger than this on purpose)
     lives: 3,
     invulnerableMs: 1500, // blinking invulnerability after being hit
+    /** After losing every life: frozen, then back with fewer lives. */
+    respawn: {
+      freezeMs: 5000,
+      lives: 1,
+      invulnerableMs: 2000,
+    },
+    /** A disconnected player's hero disappears after this long (they can still rejoin). */
+    awayRemoveMs: 10_000,
+  },
+
+  /** Two players who touch are shoved straight apart. Harmless, but walls still stop the shove. */
+  bump: {
+    distance: 50,
+    durationMs: 250,
+    /** The same two players cannot bump again for this long. */
+    cooldownMs: 500,
   },
 
   energy: {
     max: 100,
     perOrb: 10,
+  },
+
+  /** Bigger rooms get a bit more of everything so large matches stay lively. */
+  scaling: {
+    /** Rooms of this size or smaller use the base values. */
+    referencePlayers: 3,
+    /** Each player above the reference adds this fraction to obstacle counts and spawn rate. */
+    hazardPerExtraPlayer: 0.05,
   },
 
   /**
@@ -68,15 +99,17 @@ export const CONFIG = {
       cost: 30,
       durationMs: 5000,
       cooldownMs: 2000,
-      /** Moving obstacles run at this fraction of normal speed. The player is unaffected. */
+      /** Moving obstacles near you run at this fraction of normal speed. Players are unaffected. */
       factor: 0.4,
+      /** Only obstacles within this distance of you are slowed (it is a zone, not global). */
+      radius: 200,
     },
     teleport: {
       cost: 25,
       cooldownMs: 1000,
       /** Destination must be at least this far from where you are. */
       minDistance: 150,
-      /** Extra clearance required around barriers, traps and obstacles at the destination. */
+      /** Extra clearance required around walls and obstacles at the destination. */
       safeMargin: 10,
       obstacleClearance: 70,
     },
@@ -101,25 +134,26 @@ export const CONFIG = {
     /** Waves of obstacles never appear before this survival time (the end of the Easy stage). */
     wavesFromMs: 30_000,
     keyframes: [
-      { atMs: 0, name: 'Easy', drifterIntervalMs: 2000, speedMin: 60, speedMax: 100, maxDrifters: 6, trapIntervalMs: 11000, maxTraps: 1, waveChance: 0 },
-      { atMs: 30_000, name: 'Medium', drifterIntervalMs: 1400, speedMin: 80, speedMax: 140, maxDrifters: 8, trapIntervalMs: 9000, maxTraps: 2, waveChance: 0.12 },
-      { atMs: 90_000, name: 'Hard', drifterIntervalMs: 900, speedMin: 110, speedMax: 190, maxDrifters: 11, trapIntervalMs: 7000, maxTraps: 3, waveChance: 0.2 },
-      { atMs: 180_000, name: 'Extreme', drifterIntervalMs: 600, speedMin: 140, speedMax: 240, maxDrifters: 14, trapIntervalMs: 5500, maxTraps: 4, waveChance: 0.3 },
+      { atMs: 0, name: 'Easy', drifterIntervalMs: 4200, speedMin: 55, speedMax: 90, maxDrifters: 3, waveChance: 0 },
+      { atMs: 30_000, name: 'Medium', drifterIntervalMs: 3400, speedMin: 70, speedMax: 115, maxDrifters: 4, waveChance: 0.05 },
+      { atMs: 90_000, name: 'Hard', drifterIntervalMs: 2700, speedMin: 90, speedMax: 150, maxDrifters: 5, waveChance: 0.08 },
+      { atMs: 180_000, name: 'Extreme', drifterIntervalMs: 2100, speedMin: 115, speedMax: 185, maxDrifters: 6, waveChance: 0.12 },
     ] as DifficultyKeyframe[],
   },
 
-  /** Moving obstacles. Speed comes from the difficulty table; each type uses a slice of it. */
+  /** Moving enemies. They spawn in corridors, fly straight along them and vanish when they hit a wall. */
   drifters: {
     firstSpawnMs: 1200,
-    /** A new obstacle appears as a harmless marker this long before it starts moving. */
-    warningMs: 700,
-    /** Obstacles never appear closer than this to the player. */
+    /** A new enemy appears as a harmless marker this long before it starts moving. */
+    warningMs: 800,
+    /** Enemies never appear closer than this to a player. */
     minEntryDistance: 120,
-    /** A wave is this many obstacles side by side, flying the same way. */
+    /** A wave is a pack of this many enemies of one kind and speed, appearing at once in different corridors. */
     waveSize: [2, 3] as Range,
-    waveSpacing: 70,
-    /** Each extra obstacle in a wave starts moving this much later, which leaves gaps to slip through. */
+    /** Each extra enemy in a wave starts moving this much later, which leaves gaps to slip through. */
     waveStaggerMs: 250,
+    /** An enemy only spawns where it has at least this much open corridor ahead of it. */
+    minTravel: 200,
     types: {
       // speedFactor picks a slice of the stage's [speedMin, speedMax] range: 0 = slowest, 1 = fastest.
       crab: { radius: 15, speedFactor: [0.3, 0.7] as Range },
@@ -128,78 +162,42 @@ export const CONFIG = {
     },
   },
 
-  /** Stationary danger zones. How many and how often comes from the difficulty table. */
-  traps: {
-    firstSpawnMs: 8000,
-    radius: 34,
-    warningMs: 1500, // harmless blinking outline
-    activeMs: 6000, // then dangerous for this long
-    /** Edge-to-edge distance kept between a new trap and the player. */
-    minDistanceFromPlayer: 120,
+  /**
+   * The walls form a maze of corridors. The arena is a grid of cells; walls sit on the lines
+   * between cells. Every cell can be reached from every other and there are no dead ends,
+   * only loops, so nobody can get cornered. Walls block players and make flying enemies vanish.
+   */
+  maze: {
+    cols: 16,
+    rows: 8,
+    /** Wall thickness. With 58 px cells that leaves corridors about 42 px wide (a hero is 18 px). */
+    thickness: 16,
+    /**
+     * Chance of knocking out each wall segment of the basic maze, per sector (the last value
+     * is used from then on). Lower means more walls, so the maze gets tighter every minute.
+     */
+    openChanceBySector: [0.45, 0.38, 0.32, 0.26],
   },
 
-  /** Solid walls. They block the player but not the flying obstacles. */
-  barriers: {
-    /** How many walls a run starts with. */
-    count: 3,
-    sizes: [
-      { width: 16, height: 96 },
-      { width: 96, height: 16 },
-      { width: 16, height: 64 },
-      { width: 64, height: 16 },
-    ],
-    /** Keeps walls away from the arena border so there is always a way around them. */
-    wallMargin: 56,
-    /** Minimum gap between two walls (a player is 18px wide, so 64 is generous). */
-    separation: 64,
-    minDistanceFromPlayer: 110,
-  },
-
-  /** Every sector the walls are rearranged (with one more wall) and the arena changes colour. */
+  /** Every sector (minute) a brand new maze appears and the arena changes colour. */
   transform: {
     everyMs: 60_000,
     /** New walls show as an outline for this long before turning solid. */
     barrierWarningMs: 2000,
-    maxBarriers: 7,
   },
 
+  /** Orbs are the score. Supply scales with the number of players (never below the reference). */
   orbs: {
     firstSpawnMs: 1500,
-    intervalMs: [2500, 5000] as Range,
-    max: 3,
+    /** Total gap between spawns is this divided by the player count, so each player gets ~1 orb per gap. */
+    gapPerPlayerMs: 5000,
+    /** Random variation on the gap (0.3 = plus or minus 30%). */
+    jitter: 0.3,
+    /** How many orbs can lie around at once, per player. */
+    maxPerPlayer: 4,
     radius: 7,
     lifetimeMs: 12000,
     minDistanceFromPlayer: 60,
-  },
-
-  /** Random arena events. One at a time, always announced first. */
-  events: {
-    /** Delay before the very first event warning (never earlier than 30 s). */
-    firstDelayMs: [30_000, 45_000] as Range,
-    /** Quiet time between the end of one event and the next warning. */
-    intervalMs: [25_000, 45_000] as Range,
-    warningMs: 3000,
-    /** While blackout or shrinking runs, obstacles spawn this much less often (fairness). */
-    spawnIntervalFactor: 1.5,
-    gravity: {
-      durationMs: 8000,
-      /** Constant push in px per second. The player moves at 180, so you can always fight it. */
-      force: 70,
-    },
-    blackout: {
-      durationMs: 7000,
-      /** You always see this far around yourself. */
-      visibleRadius: 100,
-      fadeMs: 600,
-    },
-    shrink: {
-      durationMs: 8000,
-      /** The walls close in over this long, hold, then open again over restoreMs. */
-      shrinkMs: 3000,
-      restoreMs: 1500,
-      /** The arena never gets smaller than this fraction of its width and height. */
-      minFraction: 0.55,
-    },
   },
 };
 

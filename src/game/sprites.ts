@@ -16,6 +16,20 @@ export const PALETTE = {
   red: '#e8453c', // reserved for danger
 } as const;
 
+/** One colour per player (10 players max). Red is left out because it always means danger. */
+export const HERO_PALETTE = [
+  '#5ad7f0', // cyan
+  '#ff4fa3', // pink
+  '#f0d62a', // yellow
+  '#8be04a', // lime
+  '#ff9a3c', // orange
+  '#b38cff', // violet
+  '#ffffff', // white
+  '#2fd9b0', // teal
+  '#6aa8ff', // sky blue
+  '#d94fff', // magenta
+] as const;
+
 /**
  * Sprites are tiny text bitmaps: '#' is a pixel, '.' is empty.
  * They are drawn in code, so the game needs no image files.
@@ -99,7 +113,7 @@ export function makeSpriteTexture(
 
 /** Creates every texture the game uses. Texture keys match the core names (e.g. drifter kind). */
 export function registerTextures(scene: Phaser.Scene): void {
-  makeSpriteTexture(scene, 'hero', BITMAPS.hero, PALETTE.cyan, 4);
+  HERO_PALETTE.forEach((color, i) => makeSpriteTexture(scene, `hero-${i}`, BITMAPS.hero, color, 4));
   makeSpriteTexture(scene, 'crab', BITMAPS.crab, PALETTE.yellow, 4);
   makeSpriteTexture(scene, 'star', BITMAPS.star, PALETTE.pink, 3);
   makeSpriteTexture(scene, 'bug', BITMAPS.bug, PALETTE.grey, 4);

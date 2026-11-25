@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { circleHitsCircle, circleHitsRect, pushCircleOutOfRect, rectsTooClose } from './collision';
 import { CONFIG } from './config';
 import { formatTime } from './format';
-import { createGame, startRun, stepGame } from './game';
+import { startRun } from './game';
 import { Rng } from './rng';
 import { FixedStepper } from './stepper';
-import { addDrifter, quietGame } from './testUtils';
+import { addDrifter, me, quietGame, soloMatch, step } from './testUtils';
 import type { InputState } from './types';
 
 const STEP = CONFIG.timestep.stepMs;
@@ -80,113 +80,158 @@ describe('collision', () => {
 describe('player movement', () => {
   it('moves at the configured speed', () => {
     const s = quietGame();
-    const startX = s.player.x;
-    for (let i = 0; i < 60; i++) stepGame(s, { dx: 1, dy: 0 }, STEP);
-    expect(s.player.x - startX).toBeCloseTo(CONFIG.player.speed, 3);
+    const startX = me(s).x;
+    for (let i = 0; i < 60; i++) step(s, { dx: 1, dy: 0 });
+    expect(me(s).x - startX).toBeCloseTo(CONFIG.player.speed, 3);
   });
 
   it('moves diagonally at the same speed as straight', () => {
     const s = quietGame();
-    const { x, y } = s.player;
-    for (let i = 0; i < 30; i++) stepGame(s, { dx: 1, dy: 1 }, STEP);
-    expect(Math.hypot(s.player.x - x, s.player.y - y)).toBeCloseTo(CONFIG.player.speed * 0.5, 3);
+    const { x, y } = me(s);
+    for (let i = 0; i < 30; i++) step(s, { dx: 1, dy: 1 });
+    expect(Math.hypot(me(s).x - x, me(s).y - y)).toBeCloseTo(CONFIG.player.speed * 0.5, 3);
   });
 
   it('stays inside the arena on every side', () => {
     const s = quietGame();
-    const r = s.player.radius;
-    for (let i = 0; i < 600; i++) stepGame(s, { dx: -1, dy: -1 }, STEP);
-    expect(s.player.x).toBeCloseTo(arena.x + r);
-    expect(s.player.y).toBeCloseTo(arena.y + r);
-    for (let i = 0; i < 900; i++) stepGame(s, { dx: 1, dy: 1 }, STEP);
-    expect(s.player.x).toBeCloseTo(arena.x + arena.width - r);
-    expect(s.player.y).toBeCloseTo(arena.y + arena.height - r);
+    const r = me(s).radius;
+    for (let i = 0; i < 600; i++) step(s, { dx: -1, dy: -1 });
+    expect(me(s).x).toBeCloseTo(arena.x + r);
+    expect(me(s).y).toBeCloseTo(arena.y + r);
+    for (let i = 0; i < 900; i++) step(s, { dx: 1, dy: 1 });
+    expect(me(s).x).toBeCloseTo(arena.x + arena.width - r);
+    expect(me(s).y).toBeCloseTo(arena.y + arena.height - r);
   });
 
   it('does not move when there is no input', () => {
     const s = quietGame();
-    const { x, y } = s.player;
-    stepGame(s, IDLE, STEP);
-    expect([s.player.x, s.player.y]).toEqual([x, y]);
+    const { x, y } = me(s);
+    step(s, IDLE);
+    expect([me(s).x, me(s).y]).toEqual([x, y]);
   });
 
   it('is blocked by a barrier and slides along it', () => {
     const s = quietGame();
-    const wall = { x: s.player.x + 60, y: s.player.y - 200, width: 16, height: 400, warningMs: 0 };
+    const wall = { x: me(s).x + 60, y: me(s).y - 200, width: 16, height: 400, warningMs: 0 };
     s.barriers = [wall];
-    for (let i = 0; i < 120; i++) stepGame(s, { dx: 1, dy: 0 }, STEP);
-    expect(s.player.x + s.player.radius).toBeLessThanOrEqual(wall.x + 1e-6); // never inside the wall
+    for (let i = 0; i < 120; i++) step(s, { dx: 1, dy: 0 });
+    expect(me(s).x + me(s).radius).toBeLessThanOrEqual(wall.x + 1e-6); // never inside the wall
 
-    const yBefore = s.player.y;
-    for (let i = 0; i < 30; i++) stepGame(s, { dx: 1, dy: 1 }, STEP); // pushing diagonally into it
-    expect(s.player.x + s.player.radius).toBeLessThanOrEqual(wall.x + 1e-6);
-    expect(s.player.y).toBeGreaterThan(yBefore + 20); // still slid downward along the wall
+    const yBefore = me(s).y;
+    for (let i = 0; i < 30; i++) step(s, { dx: 1, dy: 1 }); // pushing diagonally into it
+    expect(me(s).x + me(s).radius).toBeLessThanOrEqual(wall.x + 1e-6);
+    expect(me(s).y).toBeGreaterThan(yBefore + 20); // still slid downward along the wall
   });
 });
 
 describe('lives and game state', () => {
   it('does not run until the run is started', () => {
-    const s = createGame(1);
+    const s = soloMatch(1);
     expect(s.status).toBe('ready');
-    stepGame(s, { dx: 1, dy: 0 }, STEP);
+    step(s, { dx: 1, dy: 0 });
     expect(s.timeMs).toBe(0);
     startRun(s);
     expect(s.status).toBe('playing');
   });
 
   it('starts with three lives and no energy', () => {
-    const s = createGame(1);
-    expect(s.player.lives).toBe(3);
-    expect(s.energy).toBe(0);
+    const s = soloMatch(1);
+    expect(me(s).lives).toBe(3);
+    expect(me(s).energy).toBe(0);
   });
 
   it('loses one life on a hit and becomes invulnerable', () => {
     const s = quietGame();
     addDrifter(s);
-    const result = stepGame(s, IDLE, STEP);
-    expect(result.hit).toBe(true);
-    expect(result.gameOver).toBe(false);
-    expect(s.player.lives).toBe(2);
-    expect(s.player.invulnerableMs).toBeCloseTo(CONFIG.player.invulnerableMs - 0, 5);
+    const result = step(s, IDLE);
+    expect(result.hits).toEqual([{ playerId: 'p1' }]);
+    expect(result.deaths).toHaveLength(0);
+    expect(me(s).lives).toBe(2);
+    expect(me(s).invulnerableMs).toBeCloseTo(CONFIG.player.invulnerableMs - 0, 5);
   });
 
   it('cannot be hit again while invulnerable', () => {
     const s = quietGame();
     addDrifter(s);
-    stepGame(s, IDLE, STEP);
-    for (let i = 0; i < 30; i++) stepGame(s, IDLE, STEP); // half a second, still overlapping
-    expect(s.player.lives).toBe(2);
+    step(s, IDLE);
+    for (let i = 0; i < 30; i++) step(s, IDLE); // half a second, still overlapping
+    expect(me(s).lives).toBe(2);
   });
 
   it('can be hit again once invulnerability ends', () => {
     const s = quietGame();
     addDrifter(s);
-    stepGame(s, IDLE, STEP);
+    step(s, IDLE);
     const wait = Math.ceil(CONFIG.player.invulnerableMs / STEP) + 2;
-    for (let i = 0; i < wait; i++) stepGame(s, IDLE, STEP);
-    expect(s.player.lives).toBe(1);
+    for (let i = 0; i < wait; i++) step(s, IDLE);
+    expect(me(s).lives).toBe(1);
   });
 
-  it('ends the game after the third hit and stops the clock', () => {
+  it('freezes the player after the third hit, but the match goes on', () => {
     const s = quietGame();
+    me(s).orbs = 7;
+    me(s).energy = 50;
+    const drifter = addDrifter(s);
+    let died = false;
+    for (let i = 0; i < 1000 && !died; i++) died = step(s, IDLE).deaths.length > 0;
+    expect(died).toBe(true);
+    drifter.x = arena.x + 30; // get it out of the way
+    drifter.y = arena.y + 30;
+
+    expect(me(s).alive).toBe(false);
+    expect(me(s).lives).toBe(0);
+    expect(me(s).deaths).toBe(1);
+    expect(me(s).respawnMs).toBeCloseTo(CONFIG.player.respawn.freezeMs, 0);
+    expect(me(s).orbs).toBe(7); // the score is never lost
+    expect(me(s).energy).toBe(0); // energy is
+    expect(s.status).toBe('playing');
+  });
+
+  it('respawns after the freeze with fewer lives, protection and no energy', () => {
+    const s = quietGame();
+    const drifter = addDrifter(s);
+    for (let i = 0; i < 1000 && me(s).alive; i++) step(s, IDLE);
+    drifter.x = arena.x + 30;
+    drifter.y = arena.y + 30;
+    drifter.vx = 0;
+
+    let respawned = false;
+    const freezeSteps = Math.ceil(CONFIG.player.respawn.freezeMs / STEP) + 3;
+    for (let i = 0; i < freezeSteps; i++) if (step(s, IDLE).respawns.length > 0) respawned = true;
+    expect(respawned).toBe(true);
+    expect(me(s).alive).toBe(true);
+    expect(me(s).lives).toBe(CONFIG.player.respawn.lives);
+    expect(me(s).invulnerableMs).toBeGreaterThan(0);
+    expect(me(s).invulnerableMs).toBeLessThanOrEqual(CONFIG.player.respawn.invulnerableMs);
+    expect(me(s).energy).toBe(0);
+  });
+
+  it('cannot be hurt, collect orbs or use abilities while frozen', () => {
+    const s = quietGame();
+    me(s).alive = false;
+    me(s).respawnMs = 4000;
+    me(s).energy = 100;
     addDrifter(s);
-    let sawGameOver = false;
-    for (let i = 0; i < 1000 && s.status === 'playing'; i++) {
-      if (stepGame(s, IDLE, STEP).gameOver) sawGameOver = true;
-    }
-    expect(sawGameOver).toBe(true);
-    expect(s.status).toBe('gameover');
-    expect(s.player.lives).toBe(0);
-
-    const frozenTime = s.timeMs;
-    stepGame(s, IDLE, STEP);
-    expect(s.timeMs).toBe(frozenTime);
+    s.orbs = [{ x: me(s).x, y: me(s).y, radius: 7, ttlMs: 9000 }];
+    step(s, IDLE);
+    expect(me(s).lives).toBe(3);
+    expect(s.orbs).toHaveLength(1);
   });
 
-  it('counts survival time only while playing', () => {
+  it('counts match time only while playing and ends the match after 4 minutes', () => {
     const s = quietGame();
-    for (let i = 0; i < 120; i++) stepGame(s, IDLE, STEP);
+    for (let i = 0; i < 120; i++) step(s, IDLE);
     expect(s.timeMs).toBeCloseTo(2000, 3);
+
+    s.timeMs = CONFIG.match.durationMs - STEP * 2;
+    let finished = false;
+    for (let i = 0; i < 5; i++) if (step(s, IDLE).finished) finished = true;
+    expect(finished).toBe(true);
+    expect(s.status).toBe('finished');
+
+    const frozen = s.timeMs;
+    step(s, { dx: 1, dy: 0 });
+    expect(s.timeMs).toBe(frozen);
   });
 });
 

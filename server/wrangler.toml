@@ -18,5 +18,5 @@ new_sqlite_classes = ["GameRoom"]
 
 [vars]
 # Which websites may talk to the server. "*" means any (fine while developing).
-# When you deploy, set this to your game's address, e.g. "https://neon-survival.pages.dev".
-ALLOWED_ORIGINS = "*"
+# Allowed: the published game page and your local test page. Add more addresses separated by commas.
+ALLOWED_ORIGINS = "https://senovamostafa.github.io,http://localhost:5173"

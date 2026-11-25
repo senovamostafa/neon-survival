@@ -2,6 +2,8 @@
 
 A retro-pixel arcade game for the browser. **3 to 10 players share one arena for 4 minutes and race for energy orbs. The player with the most orbs wins.**
 
+**Play it now: https://senovamostafa.github.io/neon-survival/**  (on a computer with a keyboard; share the link and a room code with friends)
+
 **Status: Phase 6 of 8 (online client).** You can now play online on your own computer: a pixel-styled title screen, lobby (room code, player list, host starts), the arena with every player's name, and a results screen, all talking to the room server. Deploying it to the internet and sound come in Phase 8.
 
 ## Run it

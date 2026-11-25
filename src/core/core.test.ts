@@ -112,7 +112,7 @@ describe('player movement', () => {
 
   it('is blocked by a barrier and slides along it', () => {
     const s = quietGame();
-    const wall = { x: s.player.x + 60, y: s.player.y - 200, width: 16, height: 400 };
+    const wall = { x: s.player.x + 60, y: s.player.y - 200, width: 16, height: 400, warningMs: 0 };
     s.barriers = [wall];
     for (let i = 0; i < 120; i++) stepGame(s, { dx: 1, dy: 0 }, STEP);
     expect(s.player.x + s.player.radius).toBeLessThanOrEqual(wall.x + 1e-6); // never inside the wall

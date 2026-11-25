@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { activateAbility } from './abilities';
 import { circleHitsRect, rectsTooClose } from './collision';
 import { CONFIG, type Config } from './config';
+import { getDifficulty } from './difficulty';
 import { createGame, startRun, stepGame } from './game';
 import { addDrifter, quietGame } from './testUtils';
 import type { InputState } from './types';
@@ -63,10 +64,13 @@ describe('moving obstacles (drifters)', () => {
     }
   });
 
-  it('have speeds inside their configured range', () => {
+  it('have speeds inside the current stage range, sliced by obstacle type', () => {
+    const easy = getDifficulty(0, CONFIG);
     for (let seed = 0; seed < 100; seed++) {
       const d = spawnOne(seed).drifters[0];
-      const [min, max] = CONFIG.drifters.types[d.kind].speed;
+      const [lo, hi] = CONFIG.drifters.types[d.kind].speedFactor;
+      const min = easy.speedMin + (easy.speedMax - easy.speedMin) * lo;
+      const max = easy.speedMin + (easy.speedMax - easy.speedMin) * hi;
       const speed = Math.hypot(d.vx, d.vy);
       expect(speed).toBeGreaterThanOrEqual(min - 1e-6);
       expect(speed).toBeLessThanOrEqual(max + 1e-6);
@@ -104,7 +108,7 @@ describe('moving obstacles (drifters)', () => {
     for (let i = 0; i < 6000; i++) {
       s.spawn.drifterMs = 0; // force a spawn attempt every step
       stepGame(s, IDLE, STEP);
-      expect(s.drifters.length).toBeLessThanOrEqual(CONFIG.drifters.max);
+      expect(s.drifters.length).toBeLessThanOrEqual(getDifficulty(s.timeMs, CONFIG).maxDrifters);
     }
   });
 });

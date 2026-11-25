@@ -4,8 +4,8 @@ import type { Drifter, GameState } from './types';
 
 /**
  * Helpers for tests only.
- * A "quiet" game has no walls, obstacles, traps or orbs and nothing spawns on its own,
- * so a test can add exactly the pieces it wants to check.
+ * A "quiet" game has no walls, obstacles, traps or orbs and nothing spawns on its own
+ * (no events, no sector changes within a test), so a test can add exactly the pieces it wants.
  */
 export function quietGame(seed = 1, cfg: Config = CONFIG): GameState {
   const state = createGame(seed, cfg);
@@ -14,6 +14,7 @@ export function quietGame(seed = 1, cfg: Config = CONFIG): GameState {
   state.traps = [];
   state.orbs = [];
   state.spawn = { drifterMs: 1e12, trapMs: 1e12, orbMs: 1e12 };
+  state.nextEventMs = 1e12;
   startRun(state);
   return state;
 }

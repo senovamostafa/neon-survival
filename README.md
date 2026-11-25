@@ -2,7 +2,7 @@
 
 An endless retro-pixel arcade survival game for the browser. Dodge the invaders, survive as long as you can.
 
-**Status: Phase 2 (survival mechanics)** - moving obstacles, solid walls, danger-zone traps, three lives, energy orbs and the four abilities. Arena events, difficulty scaling, nicknames and the leaderboard come in later phases.
+**Status: Phase 3 (endless gameplay)** - the game is now endless: difficulty rises with survival time, random arena events, and the arena transforms every minute. Sound, nicknames and the leaderboard come in later phases.
 
 ## How to play
 
@@ -20,6 +20,27 @@ An endless retro-pixel arcade survival game for the browser. Dodge the invaders,
 - **Moving obstacles** (invaders) appear at an edge as a blinking marker with direction dots, then fly across.
 - **Blue walls** block you but not the invaders. **Red circles** are traps: harmless while blinking, deadly once solid.
 - All numbers live in `src/core/config.ts`.
+
+### Difficulty and the endless arena
+
+| Survival time | Stage | New obstacle about every | Obstacle speed |
+|---|---|---|---|
+| 0 s | Easy | 2.0 s | 60-100 px/s |
+| 30 s | Medium | 1.4 s | 80-140 px/s |
+| 90 s | Hard | 0.9 s | 110-190 px/s |
+| 180 s+ | Extreme (capped) | 0.6 s | 140-240 px/s |
+
+Values blend smoothly between these rows, so it gets harder gradually rather than in jumps. The stage also controls how many obstacles and traps can exist at once, and from 30 s on, obstacles sometimes arrive as a wave of 2-3 side by side (each starts a little later, leaving gaps).
+
+**Random arena events** - one at a time, first one after 30-45 s, then every 25-45 s. Each shows a 3-second warning banner before it starts:
+
+- **Gravity shift:** a steady 70 px/s push in the announced direction for 8 s. You can always fight it (you move at 180).
+- **Blackout:** the arena goes dark for 7 s but you always see a 100 px circle around you.
+- **Shrinking arena:** the walls close in (the warning outlines where they will stop) to 55% of the arena, hold, then open again. It never gets smaller than that.
+
+During a blackout or shrink, obstacles spawn 1.5x less often to keep things fair.
+
+**Sectors:** every 60 s the arena transforms. The colour theme changes, the old walls disappear, and a new set (one more wall each time, up to 7) fades in as blinking outlines that turn solid after 2 s. A new wall waits if you are standing where it would appear.
 
 ## Run it
 
@@ -51,6 +72,8 @@ src/
     types.ts     Data shapes: GameState, Drifter, Trap, Orb, abilities...
     game.ts      createGame / startRun / stepGame: the main rules loop.
     spawn.ts     Where things appear (fair, controlled randomness) and safe teleport spots.
+    difficulty.ts Difficulty for a given survival time (blends the table in config.ts).
+    events.ts    Gravity shift, blackout and shrinking arena: scheduling and effects.
     abilities.ts activateAbility: energy cost, cooldown and effect of each ability.
     rng.ts       Seeded random numbers (same seed = same run, great for tests).
     collision.ts Circle/rectangle overlap and wall push-out.
@@ -59,6 +82,8 @@ src/
     testUtils.ts Helpers for tests (an empty "quiet" game).
     core.test.ts Tests: movement, lives, collision, timestep.
     world.test.ts Tests: walls, obstacles, traps, orbs, abilities, determinism.
+    progression.test.ts Tests: difficulty curve, waves, events, sectors, fairness fuzzing.
+  (src/game/themes.ts holds the colour themes used for each sector.)
   game/        Phaser: reads the keyboard, calls core, draws the result.
     GameScene.ts The only scene. Holds no game rules.
     sprites.ts   Pixel sprites drawn from text bitmaps, and the colour palette.
@@ -80,7 +105,7 @@ Why the split: the rules in `core/` never touch Phaser, so they are fast to test
 
 1. Game foundation (done)
 2. Survival mechanics: obstacle types, energy orbs, four abilities (done)
-3. Endless gameplay: random generation, arena events, difficulty curve
+3. Endless gameplay: random generation, arena events, difficulty curve (done; sound effects come in phase 6)
 4. Backend: Supabase tables, nickname-only players, run submission
 5. Competition: personal best, all-time and weekly leaderboards, profile
 6. Polish and deployment: chiptune sound, GitHub Pages

@@ -22,6 +22,26 @@ export interface Drifter {
   warningMs: number;
 }
 
+/** A solid wall. While warningMs > 0 it is only an outline and does not block anything yet. */
+export interface Barrier extends Rect {
+  warningMs: number;
+}
+
+export type EventKind = 'gravity' | 'blackout' | 'shrink';
+export type GravityDirection = 'up' | 'down' | 'left' | 'right';
+
+/** A random arena event. It announces itself (warning) before it takes effect (active). */
+export interface ArenaEvent {
+  kind: EventKind;
+  phase: 'warning' | 'active';
+  /** Time left in the current phase. */
+  msLeft: number;
+  /** Total length of the current phase, so progress = 1 - msLeft / totalMs. */
+  totalMs: number;
+  /** Only for gravity shifts. */
+  direction?: GravityDirection;
+}
+
 /** A stationary danger zone: harmless during the warning, harmful while active. */
 export interface Trap {
   x: number;
@@ -63,8 +83,17 @@ export interface GameState {
   drifters: Drifter[];
   traps: Trap[];
   orbs: Orb[];
-  /** Solid walls the player cannot pass through. */
-  barriers: Rect[];
+  /** Solid walls the player cannot pass through (once their warning is over). */
+  barriers: Barrier[];
+  /** The playable area right now. Equals the arena unless a shrinking-arena event is running. */
+  bounds: Rect;
+  /** The running arena event, or null. Only one event exists at a time. */
+  event: ArenaEvent | null;
+  /** Countdown until the next event's warning begins (only counts while no event runs). */
+  nextEventMs: number;
+  lastEventKind: EventKind | null;
+  /** Which 60-second stretch of the run we are in. Each new one reshuffles the walls. */
+  sector: number;
   energy: number;
   /** Stat only: never part of the leaderboard score. */
   orbsCollected: number;

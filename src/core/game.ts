@@ -1,7 +1,9 @@
 import { CONFIG, type Config } from './config';
-import { circleHitsCircle, clamp, pushCircleOutOfRect } from './collision';
+import { circleHitsCircle, circleHitsRect, clamp, pushCircleOutOfRect } from './collision';
+import { getDifficulty } from './difficulty';
+import { computeBounds, firstEventDelay, gravityPush, isEventActive, updateEvent } from './events';
 import { Rng } from './rng';
-import { placeBarriers, spawnDrifter, spawnOrb, spawnTrap } from './spawn';
+import { placeBarriers, spawnDrifters, spawnOrb, spawnTrap } from './spawn';
 import type { AbilityId, GameState, InputState, StepResult } from './types';
 
 /**
@@ -37,7 +39,12 @@ export function createGame(seed: number, cfg: Config = CONFIG): GameState {
     drifters: [],
     traps: [],
     orbs: [],
-    barriers: placeBarriers(rng, player, cfg),
+    barriers: placeBarriers(rng, player, cfg, cfg.barriers.count, 0),
+    bounds: { ...arena },
+    event: null,
+    nextEventMs: firstEventDelay(rng, cfg),
+    lastEventKind: null,
+    sector: 0,
     energy: 0,
     orbsCollected: 0,
     abilities,
@@ -69,12 +76,16 @@ export function stepGame(
   const dt = dtMs / 1000;
 
   tickTimers(state, dtMs);
+  updateEvent(state, dtMs, cfg);
+  state.bounds = computeBounds(state, cfg);
+  updateBarriers(state, dtMs, cfg);
   movePlayer(state, input, dt, cfg);
   spawnThings(state, dtMs, cfg);
   updateDrifters(state, dt, dtMs, cfg);
   updateTraps(state, dtMs);
   updateOrbs(state, dt, dtMs, cfg, result);
   state.timeMs += dtMs;
+  updateSector(state, cfg);
   checkDamage(state, cfg, result);
 
   return result;
@@ -89,9 +100,23 @@ function tickTimers(state: GameState, dtMs: number): void {
   }
 }
 
-function movePlayer(state: GameState, input: InputState, dt: number, cfg: Config): void {
-  const { arena } = cfg;
+/**
+ * Walls that are still showing their warning turn solid when it ends, unless the player is
+ * standing there. In that case they wait, so a wall can never appear on top of you.
+ */
+function updateBarriers(state: GameState, dtMs: number, cfg: Config): void {
   const p = state.player;
+  for (const b of state.barriers) {
+    if (b.warningMs <= 0) continue;
+    b.warningMs = Math.max(0, b.warningMs - dtMs);
+    const blocked = circleHitsRect({ x: p.x, y: p.y, radius: p.radius + 6 }, b);
+    if (b.warningMs === 0 && blocked) b.warningMs = cfg.timestep.stepMs; // wait one more step
+  }
+}
+
+function movePlayer(state: GameState, input: InputState, dt: number, cfg: Config): void {
+  const p = state.player;
+  const { bounds } = state;
 
   // Normalising makes diagonals exactly as fast as straight lines.
   const length = Math.hypot(input.dx, input.dy);
@@ -100,32 +125,52 @@ function movePlayer(state: GameState, input: InputState, dt: number, cfg: Config
     p.y += (input.dy / length) * cfg.player.speed * dt;
   }
 
-  // Walls push the player out (twice, so corners between two walls settle cleanly).
-  for (let pass = 0; pass < 2; pass++) {
-    for (const barrier of state.barriers) pushCircleOutOfRect(p, barrier);
-  }
+  // Gravity shift: a steady push on top of whatever the player does.
+  const push = gravityPush(state, cfg);
+  p.x += push.x * dt;
+  p.y += push.y * dt;
 
-  p.x = clamp(p.x, arena.x + p.radius, arena.x + arena.width - p.radius);
-  p.y = clamp(p.y, arena.y + p.radius, arena.y + arena.height - p.radius);
+  // Solid walls push the player out; the arena edge (which can shrink) keeps them inside.
+  // Two passes so corners and squeezes settle cleanly.
+  for (let pass = 0; pass < 2; pass++) {
+    for (const barrier of state.barriers) {
+      if (barrier.warningMs <= 0) pushCircleOutOfRect(p, barrier);
+    }
+    p.x = clamp(p.x, bounds.x + p.radius, bounds.x + bounds.width - p.radius);
+    p.y = clamp(p.y, bounds.y + p.radius, bounds.y + bounds.height - p.radius);
+  }
 }
 
 /** Counts down the spawn timers and creates new obstacles, traps and orbs. */
 function spawnThings(state: GameState, dtMs: number, cfg: Config): void {
   const { rng } = state;
   const s = state.spawn;
+  const difficulty = getDifficulty(state.timeMs, cfg);
+  const jitter = cfg.difficulty.jitter;
+  // During a blackout or a shrinking arena, things spawn less often to keep it fair.
+  const calm =
+    isEventActive(state, 'blackout') || isEventActive(state, 'shrink')
+      ? cfg.events.spawnIntervalFactor
+      : 1;
+  const nextGap = (typicalMs: number): number => typicalMs * rng.range(1 - jitter, 1 + jitter) * calm;
+
   s.drifterMs -= dtMs;
   s.trapMs -= dtMs;
   s.orbMs -= dtMs;
 
   if (s.drifterMs <= 0) {
-    const drifter = state.drifters.length < cfg.drifters.max ? spawnDrifter(rng, state.player, cfg) : null;
-    if (drifter) state.drifters.push(drifter);
-    s.drifterMs = drifter ? rng.range(...cfg.drifters.intervalMs) : 300; // retry soon if nothing fit
+    const made = state.drifters.length < difficulty.maxDrifters
+      ? spawnDrifters(rng, state.player, cfg, state.bounds, difficulty)
+      : [];
+    for (const drifter of made) {
+      if (state.drifters.length < difficulty.maxDrifters) state.drifters.push(drifter);
+    }
+    s.drifterMs = made.length > 0 ? nextGap(difficulty.drifterIntervalMs) : 300; // retry soon if nothing fit
   }
   if (s.trapMs <= 0) {
-    const trap = state.traps.length < cfg.traps.max ? spawnTrap(state, cfg) : null;
+    const trap = state.traps.length < difficulty.maxTraps ? spawnTrap(state, cfg) : null;
     if (trap) state.traps.push(trap);
-    s.trapMs = trap ? rng.range(...cfg.traps.intervalMs) : 1000;
+    s.trapMs = trap ? nextGap(difficulty.trapIntervalMs) : 1000;
   }
   if (s.orbMs <= 0) {
     const orb = state.orbs.length < cfg.orbs.max ? spawnOrb(state, cfg) : null;
@@ -147,7 +192,7 @@ function updateDrifters(state: GameState, dt: number, dtMs: number, cfg: Config)
     }
   }
 
-  // Remove obstacles that have left the arena.
+  // Remove obstacles that have left the full arena.
   const leeway = 8;
   state.drifters = state.drifters.filter(
     (d) =>
@@ -195,6 +240,19 @@ function updateOrbs(state: GameState, dt: number, dtMs: number, cfg: Config, res
     }
   }
   state.orbs = remaining;
+}
+
+/**
+ * Every sector (60 s) the arena transforms: the old walls vanish and a new set, one wall
+ * larger, appears as outlines that turn solid after a short warning. That also changes
+ * which parts of the arena are safe to stand in. The renderer swaps the colour theme.
+ */
+function updateSector(state: GameState, cfg: Config): void {
+  const sector = Math.floor(state.timeMs / cfg.transform.everyMs);
+  if (sector <= state.sector) return;
+  state.sector = sector;
+  const count = Math.min(cfg.transform.maxBarriers, cfg.barriers.count + sector);
+  state.barriers = placeBarriers(state.rng, state.player, cfg, count, cfg.transform.barrierWarningMs);
 }
 
 /** Applies damage from moving obstacles and active traps, honouring the shield and invulnerability. */

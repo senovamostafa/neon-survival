@@ -1,12 +1,21 @@
 import Phaser from 'phaser';
 import { activateAbility } from '../core/abilities';
 import { CONFIG } from '../core/config';
+import { getDifficulty } from '../core/difficulty';
+import { GRAVITY_VECTORS, insetArena } from '../core/events';
 import { formatTime } from '../core/format';
 import { createGame, startRun, stepGame } from '../core/game';
 import { Rng } from '../core/rng';
 import { FixedStepper } from '../core/stepper';
-import type { AbilityId, GameState, InputState } from '../core/types';
+import type { AbilityId, ArenaEvent, EventKind, GameState, InputState } from '../core/types';
 import { PALETTE, registerTextures } from './sprites';
+import { THEMES } from './themes';
+
+const EVENT_NAMES: Record<EventKind, string> = {
+  gravity: 'GRAVITY SHIFT',
+  blackout: 'BLACKOUT',
+  shrink: 'ARENA SHRINKING',
+};
 
 const FONT = '"Press Start 2P", monospace';
 const HUD_HEIGHT = CONFIG.arena.y - 8;
@@ -58,6 +67,19 @@ export class GameScene extends Phaser.Scene {
   private slotCosts: Phaser.GameObjects.Text[] = [];
   private slotFlashUntil: Record<AbilityId, number> = { shield: 0, slow: 0, teleport: 0, magnet: 0 };
 
+  private arenaGfx!: Phaser.GameObjects.Graphics;
+  private eventGfx!: Phaser.GameObjects.Graphics;
+  private maskGfx!: Phaser.GameObjects.Graphics;
+  private bannerTitle!: Phaser.GameObjects.Text;
+  private bannerSub!: Phaser.GameObjects.Text;
+  private indicatorText!: Phaser.GameObjects.Text;
+  private statusText!: Phaser.GameObjects.Text;
+  private themeIndex = 0;
+  private lastSector = 0;
+  private lastEventKey = '';
+  private sectorBannerUntil = 0;
+  /** Drifting specks shown during a gravity shift (visual only, so Math.random is fine here). */
+  private readonly flowDots = Array.from({ length: 44 }, () => ({ fx: Math.random(), fy: Math.random() }));
   private barrierGfx!: Phaser.GameObjects.Graphics;
   private trapGfx!: Phaser.GameObjects.Graphics;
   private ringGfx!: Phaser.GameObjects.Graphics;
@@ -76,11 +98,15 @@ export class GameScene extends Phaser.Scene {
     registerTextures(this);
     this.cameras.main.setBackgroundColor(PALETTE.background);
 
+    this.arenaGfx = this.add.graphics().setDepth(0);
     this.drawArena();
     this.barrierGfx = this.add.graphics().setDepth(1);
     this.trapGfx = this.add.graphics().setDepth(2);
+    this.eventGfx = this.add.graphics().setDepth(3);
     this.ringGfx = this.add.graphics().setDepth(11);
+    this.maskGfx = this.add.graphics().setDepth(12);
     this.createHud();
+    this.createBanners();
     this.createOverlay();
 
     this.hero = this.add.image(0, 0, 'hero').setDepth(10);
@@ -183,7 +209,10 @@ export class GameScene extends Phaser.Scene {
   private newRun(): void {
     this.state = createGame(Rng.randomSeed());
     this.stepper.reset();
-    this.drawBarriers();
+    this.lastSector = 0;
+    this.lastEventKey = '';
+    this.sectorBannerUntil = 0;
+    this.applyTheme(0);
 
     this.overlayTitle.setText('NEON SURVIVAL');
     this.overlayBody.setText(
@@ -239,9 +268,226 @@ export class GameScene extends Phaser.Scene {
       heart.setTexture(i < player.lives ? 'heart' : 'heart-empty'),
     );
 
+    this.handleSectorChange(now);
+    this.handleEventChange();
+    this.drawBarriers(now);
     this.drawTrapsAndMarkers(now);
+    this.drawEventEffects(now);
     this.drawRings(now);
     this.drawHud(now);
+    this.updateBanners(now);
+  }
+
+  // ---- sectors and events ------------------------------------------------
+
+  /** A new sector means a new colour theme, a flash and a banner. */
+  private handleSectorChange(now: number): void {
+    const { sector } = this.state;
+    if (sector === this.lastSector) return;
+    this.lastSector = sector;
+    this.applyTheme(sector);
+    this.cameras.main.flash(300, 255, 255, 255);
+    this.sectorBannerUntil = now + 2500;
+  }
+
+  /** Reacts to an event starting its warning or taking effect (shake and flash). */
+  private handleEventChange(): void {
+    const ev = this.state.event;
+    const key = ev ? `${ev.kind}:${ev.phase}` : '';
+    if (key === this.lastEventKey) return;
+    this.lastEventKey = key;
+    if (!ev) return;
+
+    if (ev.phase === 'warning') {
+      this.cameras.main.flash(250, 232, 69, 60);
+    } else if (ev.kind === 'gravity') {
+      this.cameras.main.shake(250, 0.005);
+    } else if (ev.kind === 'shrink') {
+      this.cameras.main.shake(350, 0.006);
+    }
+  }
+
+  private applyTheme(index: number): void {
+    this.themeIndex = index % THEMES.length;
+    this.cameras.main.setBackgroundColor(THEMES[this.themeIndex].background);
+    this.drawArena();
+  }
+
+  /** Arrows, drifting specks, the closing walls and the blackout mask. */
+  private drawEventEffects(now: number): void {
+    const g = this.eventGfx;
+    const mask = this.maskGfx;
+    g.clear();
+    mask.clear();
+    const ev = this.state.event;
+    if (!ev) return;
+
+    const { arena } = CONFIG;
+    const blink = Math.floor(now / 250) % 2 === 0;
+
+    if (ev.kind === 'gravity' && ev.direction) {
+      const dir = GRAVITY_VECTORS[ev.direction];
+      if (ev.phase === 'warning') {
+        if (blink) this.drawArrow(g, arena.x + arena.width / 2, arena.y + arena.height / 2, dir, 12, COLOR.yellow, 0.9);
+      } else {
+        // Specks stream in the pull direction.
+        g.fillStyle(COLOR.white, 0.35);
+        const seconds = now / 1000;
+        for (const dot of this.flowDots) {
+          const x = arena.x + this.wrap(dot.fx * arena.width + dir.x * 160 * seconds, arena.width);
+          const y = arena.y + this.wrap(dot.fy * arena.height + dir.y * 160 * seconds, arena.height);
+          if (dir.x !== 0) g.fillRect(Math.round(x), Math.round(y), 12, 2);
+          else g.fillRect(Math.round(x), Math.round(y), 2, 12);
+        }
+        this.drawArrow(g, this.state.player.x + dir.x * 34, this.state.player.y + dir.y * 34, dir, 3, COLOR.yellow, 0.8);
+      }
+    }
+
+    if (ev.kind === 'shrink') {
+      if (ev.phase === 'warning') {
+        // Dotted outline of where the walls will stop.
+        if (blink) this.dottedRect(g, insetArena(CONFIG, 1), COLOR.red);
+      } else {
+        const b = this.state.bounds;
+        g.fillStyle(0x3a0f14, 0.85);
+        g.fillRect(arena.x, arena.y, arena.width, b.y - arena.y); // top
+        g.fillRect(arena.x, b.y + b.height, arena.width, arena.y + arena.height - (b.y + b.height)); // bottom
+        g.fillRect(arena.x, b.y, b.x - arena.x, b.height); // left
+        g.fillRect(b.x + b.width, b.y, arena.x + arena.width - (b.x + b.width), b.height); // right
+        g.lineStyle(3, COLOR.red, 1);
+        g.strokeRect(b.x, b.y, b.width, b.height);
+      }
+    }
+
+    if (ev.kind === 'blackout') {
+      if (ev.phase === 'warning') {
+        if (blink) {
+          const p = this.state.player;
+          this.ringDots(g, p.x, p.y, CONFIG.events.blackout.visibleRadius, 40, 4, COLOR.white, 0.8);
+        }
+      } else {
+        this.drawBlackoutMask(ev);
+      }
+    }
+  }
+
+  /** Dark cover over the arena with a pixel-stepped hole around the hero. */
+  private drawBlackoutMask(ev: ArenaEvent): void {
+    const { arena } = CONFIG;
+    const { visibleRadius, fadeMs } = CONFIG.events.blackout;
+    const p = this.state.player;
+    const elapsed = ev.totalMs - ev.msLeft;
+    let darkness = 1; // 0 = fully visible, 1 = fully dark
+    if (elapsed < fadeMs) darkness = elapsed / fadeMs;
+    else if (ev.msLeft < fadeMs) darkness = ev.msLeft / fadeMs;
+    const radius = visibleRadius + (500 - visibleRadius) * (1 - darkness);
+
+    const g = this.maskGfx;
+    const cell = 8;
+    g.fillStyle(COLOR.hud, 0.88); // not fully opaque: far shapes stay faintly visible
+    const bottom = arena.y + arena.height;
+    for (let y = arena.y; y < bottom; y += cell) {
+      const h = Math.min(cell, bottom - y);
+      const dy = y + cell / 2 - p.y;
+      if (Math.abs(dy) >= radius) {
+        g.fillRect(arena.x, y, arena.width, h);
+        continue;
+      }
+      const half = Math.sqrt(radius * radius - dy * dy);
+      const left = Math.max(arena.x, Math.round((p.x - half) / cell) * cell);
+      const right = Math.min(arena.x + arena.width, Math.round((p.x + half) / cell) * cell);
+      if (left > arena.x) g.fillRect(arena.x, y, left - arena.x, h);
+      if (right < arena.x + arena.width) g.fillRect(right, y, arena.x + arena.width - right, h);
+    }
+  }
+
+  /** A pixel arrow made of small squares, pointing along `dir`. */
+  private drawArrow(
+    g: Phaser.GameObjects.Graphics,
+    cx: number,
+    cy: number,
+    dir: { x: number; y: number },
+    block: number,
+    color: number,
+    alpha: number,
+  ): void {
+    const cells: [number, number][] = [[-3, 0], [-2, 0], [-1, 0], [0, 0], [1, -2], [1, -1], [1, 0], [1, 1], [1, 2], [2, -1], [2, 0], [2, 1], [3, 0]];
+    g.fillStyle(color, alpha);
+    for (const [u, v] of cells) {
+      const x = cx + (dir.x * u - dir.y * v) * block;
+      const y = cy + (dir.y * u + dir.x * v) * block;
+      g.fillRect(Math.round(x - block / 2), Math.round(y - block / 2), block, block);
+    }
+  }
+
+  /** Outline made of small squares around a rectangle. */
+  private dottedRect(g: Phaser.GameObjects.Graphics, r: { x: number; y: number; width: number; height: number }, color: number): void {
+    g.fillStyle(color, 1);
+    const step = 12;
+    for (let x = r.x; x <= r.x + r.width; x += step) {
+      g.fillRect(Math.round(x) - 2, Math.round(r.y) - 2, 4, 4);
+      g.fillRect(Math.round(x) - 2, Math.round(r.y + r.height) - 2, 4, 4);
+    }
+    for (let y = r.y; y <= r.y + r.height; y += step) {
+      g.fillRect(Math.round(r.x) - 2, Math.round(y) - 2, 4, 4);
+      g.fillRect(Math.round(r.x + r.width) - 2, Math.round(y) - 2, 4, 4);
+    }
+  }
+
+  private wrap(value: number, size: number): number {
+    return ((value % size) + size) % size;
+  }
+
+  /** Event warning banner, live-event indicator, sector banner and the level/sector status line. */
+  private updateBanners(now: number): void {
+    const state = this.state;
+    const ev = state.event;
+    const secs = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
+
+    let title = '';
+    let sub = '';
+    if (ev && ev.phase === 'warning') {
+      title = `WARNING: ${EVENT_NAMES[ev.kind]}`;
+      const n = secs(ev.msLeft);
+      if (ev.kind === 'gravity') sub = `PULLING ${ev.direction?.toUpperCase()} IN ${n}`;
+      else if (ev.kind === 'blackout') sub = `LIGHTS OUT IN ${n}`;
+      else sub = `WALLS CLOSING IN ${n}`;
+    } else if (now < this.sectorBannerUntil) {
+      title = `SECTOR ${state.sector + 1}`;
+      sub = THEMES[this.themeIndex].name.toUpperCase();
+    }
+    this.bannerTitle.setText(title).setVisible(title !== '');
+    this.bannerSub.setText(sub).setVisible(title !== '');
+    this.bannerTitle.setAlpha(ev && ev.phase === 'warning' && Math.floor(now / 250) % 2 === 0 ? 0.45 : 1);
+
+    let indicator = '';
+    if (ev && ev.phase === 'active') {
+      indicator = `${EVENT_NAMES[ev.kind]}${ev.kind === 'gravity' ? ` ${ev.direction?.toUpperCase()}` : ''}  ${secs(ev.msLeft)}S`;
+    }
+    this.indicatorText.setText(indicator).setVisible(indicator !== '');
+
+    const tier = getDifficulty(state.timeMs, CONFIG).tier.toUpperCase();
+    this.statusText.setText(`LEVEL ${tier}   SECTOR ${state.sector + 1}`);
+  }
+
+  private createBanners(): void {
+    const { width } = CONFIG.screen;
+    this.bannerTitle = this.add
+      .text(width / 2, 110, '', { fontFamily: FONT, fontSize: '22px', color: PALETTE.red })
+      .setOrigin(0.5)
+      .setDepth(25);
+    this.bannerSub = this.add
+      .text(width / 2, 142, '', { fontFamily: FONT, fontSize: '12px', color: PALETTE.text })
+      .setOrigin(0.5)
+      .setDepth(25);
+    this.indicatorText = this.add
+      .text(width / 2, CONFIG.arena.y + 12, '', { fontFamily: FONT, fontSize: '10px', color: PALETTE.yellow })
+      .setOrigin(0.5, 0)
+      .setDepth(25);
+    this.statusText = this.add
+      .text(CONFIG.arena.x, CONFIG.screen.height - 9, '', { fontFamily: FONT, fontSize: '8px', color: PALETTE.dimGrey })
+      .setOrigin(0, 0.5)
+      .setDepth(25);
   }
 
   /** Grows or shrinks a pool of sprites to `count` and hides the unused ones. */
@@ -393,29 +639,47 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private drawBarriers(): void {
+  /** Solid walls, and blinking outlines for new walls that are not solid yet. */
+  private drawBarriers(now: number): void {
     const g = this.barrierGfx;
     g.clear();
+    const theme = THEMES[this.themeIndex];
+    const fill = hex(theme.barrier);
+    const edge = hex(theme.barrierEdge);
+    const blink = Math.floor(now / 150) % 2 === 0;
+
     for (const b of this.state.barriers) {
-      g.fillStyle(COLOR.indigo, 1);
-      g.fillRect(b.x, b.y, b.width, b.height);
-      g.lineStyle(2, COLOR.lightIndigo, 1);
-      g.strokeRect(b.x + 1, b.y + 1, b.width - 2, b.height - 2);
+      if (b.warningMs > 0) {
+        g.fillStyle(fill, 0.25);
+        g.fillRect(b.x, b.y, b.width, b.height);
+        if (blink) {
+          g.lineStyle(2, edge, 1);
+          g.strokeRect(b.x + 1, b.y + 1, b.width - 2, b.height - 2);
+        }
+      } else {
+        g.fillStyle(fill, 1);
+        g.fillRect(b.x, b.y, b.width, b.height);
+        g.lineStyle(2, edge, 1);
+        g.strokeRect(b.x + 1, b.y + 1, b.width - 2, b.height - 2);
+      }
     }
   }
 
+  /** Floor dots and border, drawn in the current theme's colours. */
   private drawArena(): void {
     const { arena } = CONFIG;
-    const g = this.add.graphics().setDepth(0);
+    const theme = THEMES[this.themeIndex];
+    const g = this.arenaGfx;
+    g.clear();
 
     // Dotted floor, like the reference pattern.
-    g.fillStyle(0xffffff, 1);
+    g.fillStyle(hex(theme.floorDots), 1);
     for (let y = arena.y + 12; y < arena.y + arena.height; y += 24) {
       for (let x = arena.x + 12; x < arena.x + arena.width; x += 24) g.fillRect(x, y, 2, 2);
     }
 
     // Border, drawn just outside the playable area so sprites touch its inner edge.
-    g.lineStyle(2, COLOR.line, 1);
+    g.lineStyle(2, hex(theme.border), 1);
     g.strokeRect(arena.x - 1, arena.y - 1, arena.width + 2, arena.height + 2);
   }
 

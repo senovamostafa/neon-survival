@@ -9,7 +9,50 @@
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
     <style>
       html, body { margin: 0; height: 100%; background: #14152b; overflow: hidden; }
-      #game { width: 100%; height: 100%; }
+      #game { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+      #ui {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        font-family: 'Press Start 2P', monospace; color: #b9bfd6; text-align: center; overflow: auto;
+      }
+      #ui.ui-solid { background: #14152b; }
+      #ui.ui-dim { background: rgba(20, 21, 43, 0.82); }
+      #ui.ui-off { background: none; pointer-events: none; align-items: flex-start; }
+      #ui .spectate { margin-top: 12px; padding: 8px 12px; background: #14152b; color: #ffd84a; font-size: 10px; }
+      #ui .panel { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px; max-width: 520px; width: 100%; box-sizing: border-box; }
+      #ui h1 { margin: 0; font-size: 30px; font-weight: normal; color: #35e6ff; line-height: 1.3; }
+      #ui h1.roomcode { font-size: 48px; letter-spacing: 8px; color: #ffd84a; }
+      #ui p { margin: 0; line-height: 1.8; font-size: 10px; }
+      #ui .sub { color: #8a90ad; }
+      #ui .help { color: #6c7290; font-size: 8px; }
+      #ui .or { color: #6c7290; margin-top: 6px; }
+      #ui .notice { color: #ff5a6a; min-height: 18px; }
+      #ui .countdown { color: #ffd84a; font-size: 16px; min-height: 18px; }
+      #ui label { display: flex; flex-direction: column; gap: 8px; font-size: 10px; width: 100%; }
+      #ui input {
+        font: inherit; font-size: 14px; padding: 12px; background: #0c0d1e; color: #fff; text-align: center;
+        border: 2px solid #3a3f66; outline: none; width: 100%; box-sizing: border-box; border-radius: 0;
+      }
+      #ui input:focus { border-color: #35e6ff; }
+      #ui input.code { width: 120px; letter-spacing: 4px; }
+      #ui button {
+        font: inherit; font-size: 12px; padding: 12px 18px; background: #0c0d1e; color: #fff; cursor: pointer;
+        border: 2px solid #8a90ad; border-radius: 0; box-shadow: 4px 4px 0 #000;
+      }
+      #ui button:hover:not(:disabled) { border-color: #35e6ff; color: #35e6ff; }
+      #ui button:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: 2px 2px 0 #000; }
+      #ui button:disabled { opacity: 0.4; cursor: not-allowed; }
+      #ui button.primary { border-color: #ffd84a; color: #ffd84a; width: 100%; }
+      #ui .row { display: flex; gap: 10px; align-items: stretch; }
+      #ui ul.players, #ui ol.ranking { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: 8px; }
+      #ui ul.players li, #ui ol.ranking li { display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: #0c0d1e; font-size: 12px; text-align: left; }
+      #ui li.away { opacity: 0.45; }
+      #ui .swatch { width: 14px; height: 14px; flex: none; }
+      #ui .name { flex: 1; }
+      #ui .tag { font-size: 8px; padding: 3px 5px; border: 1px solid #6c7290; color: #8a90ad; }
+      #ui .tag.you { border-color: #35e6ff; color: #35e6ff; }
+      #ui ol.ranking li.me { outline: 2px solid #ffd84a; }
+      #ui .rank { width: 24px; }
+      #ui .orbs { color: #ffd84a; }
       #game canvas { image-rendering: pixelated; }
       #touch-notice {
         display: none; height: 100%; align-items: center; justify-content: center;
@@ -17,13 +60,14 @@
         font-family: 'Press Start 2P', monospace; font-size: 14px;
       }
       @media (pointer: coarse) {
-        #game { display: none; }
+        #game, #ui { display: none; }
         #touch-notice { display: flex; }
       }
     </style>
   </head>
   <body>
     <div id="game"></div>
+    <div id="ui" class="ui-solid"></div>
     <div id="touch-notice">NEON SURVIVAL<br />PLAY ON A COMPUTER<br />WITH A KEYBOARD</div>
     <script type="module" src="/src/main.ts"></script>
   </body>

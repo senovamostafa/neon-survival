@@ -12,12 +12,42 @@ import type { AbilityId, GameState, InputMap, InputState, Player } from '../core
 import { HERO_PALETTE, PALETTE, registerTextures } from './sprites';
 import { THEMES } from './themes';
 
-const FONT = '"Press Start 2P", monospace';
+export const FONT = '"Press Start 2P", monospace';
 const HUD_HEIGHT = CONFIG.arena.y - 8;
 
 /** This browser's player. The others are computer-controlled until the online version exists. */
 const LOCAL_ID = 'p1';
 const BOT_COUNT = 3;
+
+/** Stands in for "you" while watching a match without a hero of your own. */
+const SPECTATOR: Player = {
+  id: '',
+  name: '',
+  colorIndex: 0,
+  x: 0,
+  y: 0,
+  radius: 0,
+  lives: 0,
+  invulnerableMs: 0,
+  alive: false,
+  respawnMs: 0,
+  deaths: 0,
+  energy: 0,
+  orbs: 0,
+  lastOrbAtMs: null,
+  abilities: {
+    shield: { activeMs: 0, cooldownMs: 0 },
+    slow: { activeMs: 0, cooldownMs: 0 },
+    teleport: { activeMs: 0, cooldownMs: 0 },
+    magnet: { activeMs: 0, cooldownMs: 0 },
+  },
+  bumpVx: 0,
+  bumpVy: 0,
+  bumpMs: 0,
+  connected: false,
+  awayMs: 0,
+  present: false,
+};
 
 const hex = (color: string): number => Phaser.Display.Color.HexStringToColor(color).color;
 const COLOR = {
@@ -31,11 +61,11 @@ const COLOR = {
   slow: 0x8aa0ff,
 };
 
-type KeyName = 'W' | 'A' | 'S' | 'D' | 'SPACE' | 'ENTER' | 'ONE' | 'TWO' | 'THREE' | 'FOUR';
-type KeyMap = Record<KeyName, Phaser.Input.Keyboard.Key>;
+export type KeyName = 'W' | 'A' | 'S' | 'D' | 'SPACE' | 'ENTER' | 'ONE' | 'TWO' | 'THREE' | 'FOUR';
+export type KeyMap = Record<KeyName, Phaser.Input.Keyboard.Key>;
 
 /** The four ability slots in the HUD, in key order. */
-const ABILITY_SLOTS: { id: AbilityId; key: KeyName; label: string }[] = [
+export const ABILITY_SLOTS: { id: AbilityId; key: KeyName; label: string }[] = [
   { id: 'shield', key: 'ONE', label: '1 SHIELD' },
   { id: 'slow', key: 'TWO', label: '2 SLOW' },
   { id: 'teleport', key: 'THREE', label: '3 WARP' },
@@ -56,47 +86,49 @@ const SCOREBOARD = { width: 168, rowHeight: 12, maxRows: 10 };
  */
 export class GameScene extends Phaser.Scene {
   state!: GameState; // public only so the dev debug handle can inspect it
-  private readonly stepper = new FixedStepper();
-  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private keys!: KeyMap;
+  /** Whose hero is "you" on this screen. */
+  protected localId = LOCAL_ID;
+  protected readonly stepper = new FixedStepper();
+  protected cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
+  protected keys!: KeyMap;
 
-  private heroSprites: Phaser.GameObjects.Image[] = [];
-  private heroNames: Phaser.GameObjects.Text[] = [];
-  private drifterSprites: Phaser.GameObjects.Image[] = [];
-  private orbSprites: Phaser.GameObjects.Image[] = [];
-  private hearts: Phaser.GameObjects.Image[] = [];
-  private timeText!: Phaser.GameObjects.Text;
-  private orbText!: Phaser.GameObjects.Text;
-  private slotLabels: Phaser.GameObjects.Text[] = [];
-  private slotCosts: Phaser.GameObjects.Text[] = [];
-  private slotFlashUntil: Record<AbilityId, number> = { shield: 0, slow: 0, teleport: 0, magnet: 0 };
-  private scoreRows: Phaser.GameObjects.Text[] = [];
+  protected heroSprites: Phaser.GameObjects.Image[] = [];
+  protected heroNames: Phaser.GameObjects.Text[] = [];
+  protected drifterSprites: Phaser.GameObjects.Image[] = [];
+  protected orbSprites: Phaser.GameObjects.Image[] = [];
+  protected hearts: Phaser.GameObjects.Image[] = [];
+  protected timeText!: Phaser.GameObjects.Text;
+  protected orbText!: Phaser.GameObjects.Text;
+  protected slotLabels: Phaser.GameObjects.Text[] = [];
+  protected slotCosts: Phaser.GameObjects.Text[] = [];
+  protected slotFlashUntil: Record<AbilityId, number> = { shield: 0, slow: 0, teleport: 0, magnet: 0 };
+  protected scoreRows: Phaser.GameObjects.Text[] = [];
 
-  private arenaGfx!: Phaser.GameObjects.Graphics;
-  private scoreGfx!: Phaser.GameObjects.Graphics;
-  private bannerTitle!: Phaser.GameObjects.Text;
-  private bannerSub!: Phaser.GameObjects.Text;
-  private statusText!: Phaser.GameObjects.Text;
-  private themeIndex = 0;
-  private lastSector = 0;
-  private sectorBannerUntil = 0;
-  private barrierGfx!: Phaser.GameObjects.Graphics;
-  private markerGfx!: Phaser.GameObjects.Graphics;
-  private ringGfx!: Phaser.GameObjects.Graphics;
-  private hudGfx!: Phaser.GameObjects.Graphics;
+  protected arenaGfx!: Phaser.GameObjects.Graphics;
+  protected scoreGfx!: Phaser.GameObjects.Graphics;
+  protected bannerTitle!: Phaser.GameObjects.Text;
+  protected bannerSub!: Phaser.GameObjects.Text;
+  protected statusText!: Phaser.GameObjects.Text;
+  protected themeIndex = 0;
+  protected lastSector = 0;
+  protected sectorBannerUntil = 0;
+  protected barrierGfx!: Phaser.GameObjects.Graphics;
+  protected markerGfx!: Phaser.GameObjects.Graphics;
+  protected ringGfx!: Phaser.GameObjects.Graphics;
+  protected hudGfx!: Phaser.GameObjects.Graphics;
 
-  private overlay!: Phaser.GameObjects.Container;
-  private overlayTitle!: Phaser.GameObjects.Text;
-  private overlayBody!: Phaser.GameObjects.Text;
-  private overlayPrompt!: Phaser.GameObjects.Text;
+  protected overlay!: Phaser.GameObjects.Container;
+  protected overlayTitle!: Phaser.GameObjects.Text;
+  protected overlayBody!: Phaser.GameObjects.Text;
+  protected overlayPrompt!: Phaser.GameObjects.Text;
 
-  constructor() {
-    super('GameScene');
+  constructor(key = 'GameScene') {
+    super(key);
   }
 
-  /** The player on this screen. */
-  private get me(): Player {
-    return this.state.players[0];
+  /** The player on this screen (a blank stand-in when watching without a hero). */
+  protected get me(): Player {
+    return this.state.players.find((p) => p.id === this.localId) ?? SPECTATOR;
   }
 
   create(): void {
@@ -117,13 +149,24 @@ export class GameScene extends Phaser.Scene {
     this.cursors = keyboard.createCursorKeys();
     this.keys = keyboard.addKeys('W,A,S,D,SPACE,ENTER,ONE,TWO,THREE,FOUR') as KeyMap;
 
-    this.newMatch();
+    this.begin();
 
     // Dev-only debug handle (stripped from production builds): window.__scene.state
     if (import.meta.env.DEV) (window as unknown as { __scene: GameScene }).__scene = this;
   }
 
   update(_time: number, deltaMs: number): void {
+    this.advance(deltaMs);
+    this.syncVisuals();
+  }
+
+  /** Where the local game starts. The online scene starts differently. */
+  protected begin(): void {
+    this.newMatch();
+  }
+
+  /** Moves the game forward by one frame: input, bots, the core steps. The online scene replaces this. */
+  protected advance(deltaMs: number): void {
     const confirm =
       Phaser.Input.Keyboard.JustDown(this.keys.SPACE) ||
       Phaser.Input.Keyboard.JustDown(this.keys.ENTER);
@@ -159,13 +202,11 @@ export class GameScene extends Phaser.Scene {
         if (confirm) this.newMatch();
         break;
     }
-
-    this.syncVisuals();
   }
 
   // ---- input -------------------------------------------------------------
 
-  private readInput(): InputState {
+  protected readInput(): InputState {
     const left = this.cursors.left.isDown || this.keys.A.isDown;
     const right = this.cursors.right.isDown || this.keys.D.isDown;
     const up = this.cursors.up.isDown || this.keys.W.isDown;
@@ -174,66 +215,80 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Keyboard for you, the bot brain for everyone else. */
-  private collectInputs(): InputMap {
+  protected collectInputs(): InputMap {
     const inputs: InputMap = {};
     for (const p of this.state.players) {
-      inputs[p.id] = p.id === LOCAL_ID ? this.readInput() : botInput(this.state, p.id);
+      inputs[p.id] = p.id === this.localId ? this.readInput() : botInput(this.state, p.id);
     }
     return inputs;
   }
 
-  private runBots(): void {
+  protected runBots(): void {
     for (const p of this.state.players) {
-      if (p.id === LOCAL_ID) continue;
+      if (p.id === this.localId) continue;
       const ability = botAbility(this.state, p.id);
       if (ability) activateAbility(this.state, p.id, ability);
     }
   }
 
   /** Asks the core to use one of your abilities and shows feedback for success or refusal. */
-  private tryAbility(id: AbilityId): void {
-    const result = activateAbility(this.state, LOCAL_ID, id);
+  protected tryAbility(id: AbilityId): void {
+    const result = activateAbility(this.state, this.localId, id);
     if (!result.ok) {
       this.slotFlashUntil[id] = this.time.now + 300; // red flash on the HUD slot
       return;
     }
 
+    this.playAbilityEffect(id, result.from, result.to, true);
+  }
+
+  /** Sparks and flashes for an ability. `mine` makes the screen flash for the player's own slow-motion. */
+  protected playAbilityEffect(
+    id: AbilityId,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    mine: boolean,
+  ): void {
     switch (id) {
       case 'shield':
-        this.burst(result.to.x, result.to.y, COLOR.cyan, 10);
+        this.burst(to.x, to.y, COLOR.cyan, 10);
         break;
       case 'slow':
-        this.cameras.main.flash(150, 138, 160, 255);
+        if (mine) this.cameras.main.flash(150, 138, 160, 255);
+        else this.burst(to.x, to.y, COLOR.slow, 8);
         break;
       case 'teleport': {
-        this.burst(result.from.x, result.from.y, COLOR.cyan, 14);
-        this.burst(result.to.x, result.to.y, COLOR.cyan, 14);
-        const hero = this.heroSprites[0];
-        hero.setScale(1.8);
-        this.tweens.add({ targets: hero, scale: 1, duration: 220 });
+        this.burst(from.x, from.y, COLOR.cyan, 14);
+        this.burst(to.x, to.y, COLOR.cyan, 14);
+        const index = this.state.players.findIndex((p) => p.id === this.localId);
+        const hero = mine ? this.heroSprites[index] : undefined;
+        if (hero) {
+          hero.setScale(1.8);
+          this.tweens.add({ targets: hero, scale: 1, duration: 220 });
+        }
         break;
       }
       case 'magnet':
-        this.burst(result.to.x, result.to.y, COLOR.yellow, 10);
+        this.burst(to.x, to.y, COLOR.yellow, 10);
         break;
     }
   }
 
   /** Turns what happened in a step into sparks and screen shakes. */
-  private showResult(result: ReturnType<typeof stepGame>): void {
+  protected showResult(result: ReturnType<typeof stepGame>): void {
     const at = (id: string) => this.state.players.find((p) => p.id === id)!;
 
     for (const pickup of result.pickups) this.burst(pickup.x, pickup.y, hex(HERO_PALETTE[at(pickup.playerId).colorIndex]), 6);
     for (const b of result.shieldBlocks) {
       const p = at(b.playerId);
       this.burst(p.x, p.y, COLOR.cyan, 12);
-      if (p.id === LOCAL_ID) this.cameras.main.shake(80, 0.004);
+      if (p.id === this.localId) this.cameras.main.shake(80, 0.004);
     }
-    for (const h of result.hits) if (h.playerId === LOCAL_ID) this.cameras.main.shake(150, 0.008);
+    for (const h of result.hits) if (h.playerId === this.localId) this.cameras.main.shake(150, 0.008);
     for (const d of result.deaths) {
       const p = at(d.playerId);
       this.burst(p.x, p.y, COLOR.red, 14);
-      if (p.id === LOCAL_ID) this.cameras.main.shake(300, 0.012);
+      if (p.id === this.localId) this.cameras.main.shake(300, 0.012);
     }
     for (const r of result.respawns) {
       const p = at(r.playerId);
@@ -250,9 +305,9 @@ export class GameScene extends Phaser.Scene {
   // ---- match lifecycle ---------------------------------------------------
 
   /** Builds a fresh local match (you plus bots) and shows the "press space" screen. */
-  private newMatch(): void {
+  protected newMatch(): void {
     const roster = [
-      { id: LOCAL_ID, name: 'YOU' },
+      { id: this.localId, name: 'YOU' },
       ...Array.from({ length: BOT_COUNT }, (_, i) => ({ id: `b${i + 1}`, name: `BOT ${i + 1}` })),
     ];
     this.state = createMatch(Rng.randomSeed(), roster);
@@ -270,7 +325,7 @@ export class GameScene extends Phaser.Scene {
     this.syncVisuals();
   }
 
-  private showResults(): void {
+  protected showResults(): void {
     const table = rankPlayers(this.state);
     const lines = table.map(
       (r) => `${String(r.rank).padStart(2)}. ${r.name.padEnd(7)} ${String(r.orbs).padStart(3)} ORBS`,
@@ -284,7 +339,7 @@ export class GameScene extends Phaser.Scene {
   // ---- drawing -----------------------------------------------------------
 
   /** Copies the core state onto the sprites. Positions are rounded to keep pixels crisp. */
-  private syncVisuals(): void {
+  protected syncVisuals(): void {
     const { players, drifters, orbs } = this.state;
     const me = this.me;
     const now = this.time.now;
@@ -304,7 +359,7 @@ export class GameScene extends Phaser.Scene {
     players.forEach((p, i) => {
       const sprite = this.heroSprites[i];
       const label = this.heroNames[i];
-      sprite.setTexture(`hero-${p.colorIndex}`).setDepth(p.id === LOCAL_ID ? 10 : 9);
+      sprite.setTexture(`hero-${p.colorIndex}`).setDepth(p.id === this.localId ? 10 : 9);
       sprite.setVisible(p.present);
       label.setVisible(p.present && p.alive);
       if (!p.present) return;
@@ -355,7 +410,7 @@ export class GameScene extends Phaser.Scene {
   // ---- sectors -----------------------------------------------------------
 
   /** A new sector means a new colour theme, a flash and a banner. */
-  private handleSectorChange(now: number): void {
+  protected handleSectorChange(now: number): void {
     const { sector } = this.state;
     if (sector === this.lastSector) return;
     this.lastSector = sector;
@@ -364,14 +419,14 @@ export class GameScene extends Phaser.Scene {
     this.sectorBannerUntil = now + 2500;
   }
 
-  private applyTheme(index: number): void {
+  protected applyTheme(index: number): void {
     this.themeIndex = index % THEMES.length;
     this.cameras.main.setBackgroundColor(THEMES[this.themeIndex].background);
     this.drawArena();
   }
 
   /** "You are down" and sector banners, and the status line. */
-  private updateBanners(now: number): void {
+  protected updateBanners(now: number): void {
     const state = this.state;
     const me = this.me;
     const secs = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
@@ -394,7 +449,7 @@ export class GameScene extends Phaser.Scene {
     this.statusText.setText(`LEVEL ${tier}   SECTOR ${state.sector + 1}   DEATHS ${me.deaths}`);
   }
 
-  private createBanners(): void {
+  protected createBanners(): void {
     const { width } = CONFIG.screen;
     this.bannerTitle = this.add
       .text(width / 2, 110, '', { fontFamily: FONT, fontSize: '22px', color: PALETTE.red })
@@ -412,7 +467,7 @@ export class GameScene extends Phaser.Scene {
 
   // ---- scoreboard --------------------------------------------------------
 
-  private createScoreboard(): void {
+  protected createScoreboard(): void {
     this.scoreGfx = this.add.graphics().setDepth(24);
     for (let i = 0; i < SCOREBOARD.maxRows; i++) {
       this.scoreRows.push(
@@ -422,7 +477,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Live standings in the corner of the arena. */
-  private drawScoreboard(): void {
+  protected drawScoreboard(): void {
     const { arena } = CONFIG;
     const table = rankPlayers(this.state);
     const x = arena.x + arena.width - SCOREBOARD.width - 6;
@@ -439,7 +494,7 @@ export class GameScene extends Phaser.Scene {
         return;
       }
       const player = this.state.players.find((p) => p.id === entry.playerId)!;
-      const you = player.id === LOCAL_ID ? '>' : ' ';
+      const you = player.id === this.localId ? '>' : ' ';
       const name = entry.name.slice(0, 7).padEnd(7);
       row
         .setVisible(true)
@@ -452,7 +507,7 @@ export class GameScene extends Phaser.Scene {
   // ---- pools and shapes --------------------------------------------------
 
   /** Grows or shrinks a pool of sprites to `count` and hides the unused ones. */
-  private syncPool(
+  protected syncPool(
     pool: Phaser.GameObjects.Image[],
     count: number,
     make: (index: number) => Phaser.GameObjects.Image,
@@ -462,7 +517,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Direction dots shown next to an obstacle that is about to start moving. */
-  private drawMarkers(): void {
+  protected drawMarkers(): void {
     const g = this.markerGfx;
     g.clear();
 
@@ -479,7 +534,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Shield squares, magnet range and slow-motion zones, drawn around every player who has them on. */
-  private drawRings(now: number): void {
+  protected drawRings(now: number): void {
     const g = this.ringGfx;
     g.clear();
     const blink = Math.floor(now / 120) % 2 === 0;
@@ -488,7 +543,7 @@ export class GameScene extends Phaser.Scene {
       if (!p.present || !p.alive) continue;
       const x = Math.round(p.x);
       const y = Math.round(p.y);
-      const mine = p.id === LOCAL_ID;
+      const mine = p.id === this.localId;
 
       const shield = p.abilities.shield.activeMs;
       if (shield > 0 && (shield > 1500 || blink)) {
@@ -509,7 +564,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Energy bar and the four ability slots for your hero. Redrawn every frame; it is only a few rectangles. */
-  private drawHud(now: number): void {
+  protected drawHud(now: number): void {
     const g = this.hudGfx;
     g.clear();
     const me = this.me;
@@ -554,7 +609,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Draws a ring of small squares, which looks more "pixel" than a smooth circle. */
-  private ringDots(
+  protected ringDots(
     g: Phaser.GameObjects.Graphics,
     cx: number,
     cy: number,
@@ -577,7 +632,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** A quick burst of little squares flying outwards, used for pickups, shield, bumps and teleport. */
-  private burst(x: number, y: number, color: number, count: number): void {
+  protected burst(x: number, y: number, color: number, count: number): void {
     for (let i = 0; i < count; i++) {
       const angle = (i / count) * Math.PI * 2;
       const piece = this.add.rectangle(Math.round(x), Math.round(y), 4, 4, color).setDepth(15);
@@ -593,7 +648,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Solid walls, and blinking outlines for new walls that are not solid yet. */
-  private drawBarriers(now: number): void {
+  protected drawBarriers(now: number): void {
     const g = this.barrierGfx;
     g.clear();
     const theme = THEMES[this.themeIndex];
@@ -619,7 +674,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Floor dots and border, drawn in the current theme's colours. */
-  private drawArena(): void {
+  protected drawArena(): void {
     const { arena } = CONFIG;
     const theme = THEMES[this.themeIndex];
     const g = this.arenaGfx;
@@ -636,7 +691,7 @@ export class GameScene extends Phaser.Scene {
     g.strokeRect(arena.x - 1, arena.y - 1, arena.width + 2, arena.height + 2);
   }
 
-  private createHud(): void {
+  protected createHud(): void {
     const bg = this.add.graphics().setDepth(20);
     bg.fillStyle(COLOR.hud, 1);
     bg.fillRect(0, 0, CONFIG.screen.width, HUD_HEIGHT);
@@ -676,7 +731,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private createOverlay(): void {
+  protected createOverlay(): void {
     const { width, height } = CONFIG.screen;
     const dim = this.add.rectangle(0, 0, width, height, COLOR.hud, 0.86).setOrigin(0, 0);
 

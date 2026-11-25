@@ -2,7 +2,7 @@
 
 A retro-pixel arcade game for the browser. **3 to 10 players share one arena for 4 minutes and race for energy orbs. The player with the most orbs wins.**
 
-**Status: Phase 5 of 8 (room server).** The game rules support many players at once. You can play them locally (you against three bots), and there is now a real room server (create a room, join by code, lobby, countdown, the 4-minute match, results) that you can run on your own computer and load-test with 10 players. The browser game does not connect to it yet; that is Phase 6.
+**Status: Phase 6 of 8 (online client).** You can now play online on your own computer: a pixel-styled title screen, lobby (room code, player list, host starts), the arena with every player's name, and a results screen, all talking to the room server. Deploying it to the internet and sound come in Phase 8.
 
 ## Run it
 
@@ -13,7 +13,22 @@ npm install
 npm run dev
 ```
 
-Open the address it prints (normally http://localhost:5173). Click the game once, press **Space** to start.
+Open the address it prints (normally http://localhost:5173).
+
+### Play online (on one computer, with friends on the same network or in several tabs)
+
+You need two PowerShell windows, one for the room server and one for the page:
+
+```powershell
+npm run server:dev   # the room server, on port 8787 (leave it running)
+npm run dev          # the page, on port 5173
+```
+
+Open http://localhost:5173, type a nickname (3-12 letters, digits or `_`) and press **CREATE A ROOM**. Share the 4-letter code; friends type it under **JOIN**. A match needs at least 3 players; the host presses **START MATCH**. To try it alone, open the page in 3 browser tabs (use a different nickname in each).
+
+If the server is somewhere else, build with `VITE_SERVER_URL` set, e.g. `$env:VITE_SERVER_URL="https://my-server.example.com"; npm run build`.
+
+**Offline practice** (you against three bots, no server needed): open http://localhost:5173/?local and press **Space**.
 
 Other commands:
 
@@ -27,7 +42,7 @@ npm run preview     # serve the production build locally
 
 ## How to play
 
-- **Move:** WASD or arrow keys. **Start / play again:** Space.
+- **Move:** WASD or arrow keys. **Start / play again (offline mode):** Space.
 - **Goal:** collect more yellow orbs than anyone else before the 4:00 clock runs out. Ties go to whoever reached their final count first.
 - Orbs are shared: the first player to touch one takes it. Each orb is +1 score and +10 energy. Spending energy never lowers your score.
 - **Abilities** (cost energy, shown in the top bar):
@@ -78,16 +93,27 @@ src/
     bots.ts        Computer-controlled players (local play, tests, later load tests).
     rng.ts         Seeded random numbers (same seed = same match).
     collision.ts   Circle/rectangle overlap and wall push-out.
+    movement.ts    moveHero: how a hero walks. Used by the server AND by the browser's prediction.
     stepper.ts     Turns frame times into fixed 60 Hz simulation steps.
     format.ts      Time as MM:SS.
     testUtils.ts   Helpers for tests (an empty "quiet" game).
     *.test.ts      Unit tests (core, world, progression, multiplayer).
-  game/        Phaser: reads the keyboard, calls the core, draws the result.
-    GameScene.ts   The only scene. Holds no game rules.
+  game/        Phaser: reads the keyboard, draws the arena. No game rules.
+    GameScene.ts   The offline match (you + bots) and ALL the arena drawing code.
+    OnlineScene.ts The online arena: the same drawing, fed from the server's snapshots.
     sprites.ts     Pixel sprites drawn from text bitmaps, hero colours, palette.
     themes.ts      Arena colour themes, one per sector.
-  main.ts      Starts Phaser.
+  main.ts      Starts Phaser and the HTML screens.
   net/         Messages between browser and server (protocol.ts), shared by both.
+  online/      The browser side of online play, in plain TypeScript (all tested without a browser).
+    connection.ts    Room web requests and the WebSocket; name and room-code checks.
+    session.ts       Everything we know about the room, built from server messages.
+    interpolation.ts Smooths other players between the 20-per-second snapshots.
+    prediction.ts    Moves your own hero at once with core/movement.ts, then corrects it gently.
+    view.ts          Turns server snapshots into a picture the drawing code understands.
+    inputSender.ts   Decides when to tell the server which keys are held.
+    app.ts           Ties it together for the screens and the arena.
+  ui/          The title, lobby and results screens as plain HTML (styles in index.html).
 index.html     Page shell, pixel font, "play on a computer" notice for touch devices.
 server/        The room server (Cloudflare Worker + Durable Object). See server/README.md.
 ```
@@ -100,6 +126,8 @@ Why the split: the rules in `core/` never touch Phaser, so they are fast to test
 - **Port 5173 already in use**: stop the other dev server, or run `npm run dev -- --port 5174`.
 - **Pixel font looks like plain monospace**: the font loads from Google Fonts, so it needs internet. The game still works without it.
 - **Keys do nothing**: click the game area once so the page has keyboard focus.
+- **"CANNOT REACH THE SERVER"**: start the room server first (`npm run server:dev`) and check it says it is listening on port 8787.
+- **Hero feels slightly rubbery**: your own hero is moved at once and the server nudges it back when they disagree (for example after being bumped). That is expected.
 - **Blank page in a hidden or background tab**: browsers pause animation in hidden tabs. Bring the tab to the front.
 
 ## Roadmap
@@ -109,7 +137,7 @@ Why the split: the rules in `core/` never touch Phaser, so they are fast to test
 3. Endless gameplay: difficulty curve and arena sectors (done; the traps and the gravity, blackout and shrinking-arena events were later removed to keep it lighter)
 4. Multiplayer game core: N players, bumping, contested orbs, respawns, 4-minute match, ranking, bots (done)
 5. **Realtime server: a Cloudflare Worker with one Durable Object per room, lobby and countdown, server game loop, state snapshots, 10-player load test (done; runs locally, deploy comes in phase 8)**
-6. Online client: pixel lobby, nickname and results screens, smoothing of other players, own-player prediction
+6. **Online client: pixel title, lobby and results screens, names in the arena, smoothing of other players, own-player prediction (done; runs locally)**
 7. Persistence: D1 database, nickname-only players, wins and best-orb-count leaderboards (all-time and weekly)
 8. Polish and deployment: chiptune sound, performance and browser testing, deploy to Cloudflare
 

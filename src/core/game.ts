@@ -1,5 +1,5 @@
 import { CONFIG, type Config } from './config';
-import { circleHitsCircle, circleHitsRect, clamp, pushCircleOutOfRect } from './collision';
+import { circleHitsCircle, circleHitsRect } from './collision';
 import { getDifficulty } from './difficulty';
 import {
   applyBumps,
@@ -9,6 +9,7 @@ import {
   spawnPositions,
   type RosterEntry,
 } from './players';
+import { moveHero } from './movement';
 import { mazeForSector, mazeToBarriers, snapToDistinctCells } from './maze';
 import { Rng } from './rng';
 import { activePlayers, isActive, presentPlayers } from './roster';
@@ -80,7 +81,7 @@ export function stepGame(
 
   tickTimers(state, dtMs, cfg, result);
   updateBarriers(state, dtMs, cfg);
-  movePlayers(state, inputs, dt, dtMs, cfg);
+  movePlayers(state, inputs, dtMs, cfg);
   applyBumps(state, cfg, result);
   spawnThings(state, dtMs, cfg);
   updateDrifters(state, dt, dtMs, cfg, result);
@@ -144,36 +145,9 @@ function updateBarriers(state: GameState, dtMs: number, cfg: Config): void {
   }
 }
 
-function movePlayers(state: GameState, inputs: InputMap, dt: number, dtMs: number, cfg: Config): void {
-  const { arena } = cfg;
-
+function movePlayers(state: GameState, inputs: InputMap, dtMs: number, cfg: Config): void {
   for (const p of activePlayers(state)) {
-    const input = inputs[p.id] ?? IDLE;
-
-    // Normalising makes diagonals exactly as fast as straight lines.
-    const length = Math.hypot(input.dx, input.dy);
-    if (length > 0) {
-      p.x += (input.dx / length) * cfg.player.speed * dt;
-      p.y += (input.dy / length) * cfg.player.speed * dt;
-    }
-
-    // A shove from bumping another player.
-    if (p.bumpMs > 0) {
-      const t = Math.min(dtMs, p.bumpMs) / 1000;
-      p.x += p.bumpVx * t;
-      p.y += p.bumpVy * t;
-      p.bumpMs = Math.max(0, p.bumpMs - dtMs);
-    }
-
-    // Solid walls push the player out; the arena edge keeps them inside.
-    // Two passes so corners between two walls settle cleanly.
-    for (let pass = 0; pass < 2; pass++) {
-      for (const barrier of state.barriers) {
-        if (barrier.warningMs <= 0) pushCircleOutOfRect(p, barrier);
-      }
-      p.x = clamp(p.x, arena.x + p.radius, arena.x + arena.width - p.radius);
-      p.y = clamp(p.y, arena.y + p.radius, arena.y + arena.height - p.radius);
-    }
+    moveHero(p, inputs[p.id] ?? IDLE, dtMs, state.barriers, cfg);
   }
 }
 
